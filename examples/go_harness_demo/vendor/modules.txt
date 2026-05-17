@@ -1,0 +1,4 @@
+# github.com/Agent-Field/agentfield/sdk/go v0.1.6 => ../../sdk/go
+## explicit; go 1.21
+github.com/Agent-Field/agentfield/sdk/go/harness
+# github.com/Agent-Field/agentfield/sdk/go => ../../sdk/go

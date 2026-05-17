@@ -1,0 +1,12 @@
+# github.com/Agent-Field/agentfield/sdk/go v0.0.0 => ../../../../sdk/go
+## explicit; go 1.21
+github.com/Agent-Field/agentfield/sdk/go/agent
+github.com/Agent-Field/agentfield/sdk/go/ai
+github.com/Agent-Field/agentfield/sdk/go/client
+github.com/Agent-Field/agentfield/sdk/go/did
+github.com/Agent-Field/agentfield/sdk/go/harness
+github.com/Agent-Field/agentfield/sdk/go/types
+# gopkg.in/yaml.v3 v3.0.1
+## explicit
+gopkg.in/yaml.v3
+# github.com/Agent-Field/agentfield/sdk/go => ../../../../sdk/go
