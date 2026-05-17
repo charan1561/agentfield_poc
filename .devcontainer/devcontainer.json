@@ -1,0 +1,22 @@
+{
+  "name": "AgentField Dev",
+  "dockerComposeFile": ["../deployments/docker/docker-compose.dev.yml"],
+  "service": "dev",
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "ms-python.python",
+        "dbaeumer.vscode-eslint",
+        "bradlc.vscode-tailwindcss"
+      ],
+      "settings": {
+        "go.toolsEnvVars": {
+          "GOFLAGS": "-mod=vendor"
+        }
+      }
+    }
+  },
+  "forwardPorts": [8080, 5173, 8001]
+}

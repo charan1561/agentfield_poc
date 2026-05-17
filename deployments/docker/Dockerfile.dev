@@ -1,0 +1,87 @@
+# AgentField Dev Image
+# All-in-one: Go 1.25 + Python 3.11 + Node 20 + pnpm + CGO toolchain
+# Build on personal laptop (unrestricted internet), develop on office laptop.
+#
+# Usage:
+#   docker build -f deployments/docker/Dockerfile.dev -t agentfield-dev:latest .
+#   docker compose -f deployments/docker/docker-compose.dev.yml up -d
+
+FROM golang:1.25-bookworm
+
+# --- System packages + CGO toolchain ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    git \
+    curl \
+    wget \
+    ca-certificates \
+    gnupg \
+    sqlite3 \
+    libsqlite3-dev \
+    postgresql-client \
+    jq \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Node 20 + pnpm ---
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable \
+    && corepack prepare pnpm@latest --activate \
+    && npm install -g npm@latest
+
+# --- Go developer tooling ---
+RUN go install github.com/air-verse/air@latest \
+    && go install github.com/pressly/goose/v3/cmd/goose@latest \
+    && go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# --- Pre-warm Go module cache (belt-and-suspenders alongside vendor/) ---
+WORKDIR /tmp/modcache
+
+COPY control-plane/go.mod control-plane/go.sum ./control-plane/
+RUN cd control-plane && go mod download
+
+COPY sdk/go/go.mod sdk/go/go.sum ./sdk/go/
+RUN cd sdk/go && go mod download
+
+RUN rm -rf /tmp/modcache
+
+# --- Pre-install Python SDK dependencies ---
+WORKDIR /tmp/pydeps
+COPY sdk/python/pyproject.toml sdk/python/README.md ./sdk/python/
+COPY sdk/python/agentfield/__init__.py ./sdk/python/agentfield/
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    ./sdk/python[dev] \
+    && rm -rf /tmp/pydeps
+
+# --- Cache node_modules for first-run population ---
+WORKDIR /tmp/nodecache
+
+COPY control-plane/web/client/package.json control-plane/web/client/pnpm-lock.yaml ./web-client/
+RUN cd web-client && pnpm install --frozen-lockfile
+
+COPY sdk/typescript/package.json sdk/typescript/package-lock.json ./ts-sdk/
+RUN cd ts-sdk && npm ci
+
+# --- Environment ---
+ENV CGO_ENABLED=1 \
+    GOFLAGS="-mod=vendor" \
+    GONOSUMDB="*" \
+    GONOSUMCHECK="*" \
+    GONOPROXY="*" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /workspace
+
+COPY deployments/docker/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
+RUN chmod +x /usr/local/bin/dev-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/dev-entrypoint.sh"]
+CMD ["bash"]

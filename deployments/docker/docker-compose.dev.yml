@@ -1,0 +1,54 @@
+services:
+  dev:
+    image: agentfield-dev:latest
+    container_name: agentfield-dev
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    volumes:
+      # Source code from host (live editing via bind mount)
+      - ../../:/workspace
+      # Go build cache (persists across container restarts)
+      - af-go-build-cache:/root/.cache/go-build
+      # Linux-native node_modules (shadows Windows host paths)
+      - af-node-modules-web:/workspace/control-plane/web/client/node_modules
+      - af-node-modules-ts-sdk:/workspace/sdk/typescript/node_modules
+    ports:
+      - "8080:8080"    # Control plane
+      - "5173:5173"    # Vite dev server
+      - "8001:8001"    # Agent port
+    environment:
+      CGO_ENABLED: "1"
+      GOFLAGS: "-mod=vendor"
+      GONOSUMDB: "*"
+      GONOSUMCHECK: "*"
+      GONOPROXY: "*"
+      GIN_MODE: debug
+      AGENTFIELD_MODE: local
+      AGENTFIELD_UI_MODE: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: agentfield-dev-postgres
+    environment:
+      POSTGRES_USER: agentfield
+      POSTGRES_PASSWORD: agentfield
+      POSTGRES_DB: agentfield
+    ports:
+      - "5433:5432"
+    volumes:
+      - af-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentfield"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+volumes:
+  af-go-build-cache:
+  af-node-modules-web:
+  af-node-modules-ts-sdk:
+  af-pgdata:
