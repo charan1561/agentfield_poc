@@ -33,22 +33,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
-    && corepack prepare pnpm@latest --activate \
-    && npm install -g npm@latest
+    && corepack prepare pnpm@10 --activate
 
 # --- Go developer tooling ---
 RUN go install github.com/air-verse/air@latest \
     && go install github.com/pressly/goose/v3/cmd/goose@latest \
     && go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
-# --- Pre-warm Go module cache (belt-and-suspenders alongside vendor/) ---
+# --- Validate vendored Go modules for offline development ---
 WORKDIR /tmp/modcache
 
 COPY control-plane/go.mod control-plane/go.sum ./control-plane/
-RUN cd control-plane && go mod download
+COPY control-plane/vendor ./control-plane/vendor/
+RUN test -s control-plane/vendor/modules.txt
 
 COPY sdk/go/go.mod sdk/go/go.sum ./sdk/go/
-RUN cd sdk/go && go mod download
+COPY sdk/go/vendor ./sdk/go/vendor/
+RUN test -s sdk/go/vendor/modules.txt
 
 RUN rm -rf /tmp/modcache
 
@@ -67,7 +68,7 @@ COPY control-plane/web/client/package.json control-plane/web/client/pnpm-lock.ya
 RUN cd web-client && pnpm install --frozen-lockfile
 
 COPY sdk/typescript/package.json sdk/typescript/package-lock.json ./ts-sdk/
-RUN cd ts-sdk && npm ci
+RUN cd ts-sdk && npm ci --ignore-scripts
 
 # --- Environment ---
 ENV CGO_ENABLED=1 \
@@ -81,7 +82,8 @@ ENV CGO_ENABLED=1 \
 WORKDIR /workspace
 
 COPY deployments/docker/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
-RUN chmod +x /usr/local/bin/dev-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/dev-entrypoint.sh \
+    && chmod +x /usr/local/bin/dev-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/dev-entrypoint.sh"]
 CMD ["bash"]
