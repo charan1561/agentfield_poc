@@ -1,0 +1,9 @@
+agentfield
+langgraph>=0.5.4
+langchain-core
+openai
+pydantic>=2.0
+python-dotenv
+pandas
+numpy
+scikit-learn
