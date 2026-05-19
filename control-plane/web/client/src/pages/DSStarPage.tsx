@@ -407,9 +407,9 @@ export function DSStarPage() {
   };
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="-m-4 sm:-m-6 flex flex-col" style={{ height: "calc(100vh - 4rem)" }}>
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-border/60">
+      <div className="flex items-center justify-between px-6 py-4 border-b border-border/60 shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center h-9 w-9 rounded-lg bg-primary/10">
             <Microscope className="h-5 w-5 text-primary" />
@@ -440,7 +440,7 @@ export function DSStarPage() {
       </div>
 
       {/* Main content */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 min-h-0 overflow-hidden">
         <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-0 h-full">
           {/* Left panel: config */}
           <div className="border-r border-border/60 overflow-y-auto p-5 space-y-5">
@@ -599,7 +599,7 @@ export function DSStarPage() {
                 )}
               </>
             ) : (
-              <div className="flex items-center justify-center h-full text-muted-foreground">
+              <div className="flex items-center justify-center min-h-[400px] h-full text-muted-foreground">
                 <div className="text-center space-y-2">
                   <Microscope className="h-12 w-12 mx-auto opacity-20" />
                   <p className="text-sm">
