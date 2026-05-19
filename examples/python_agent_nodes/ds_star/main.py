@@ -54,6 +54,6 @@ if __name__ == "__main__":
 
     port_env = os.getenv("PORT")
     if port_env is None:
-        app.run(auto_port=True, host="::")
+        app.run(auto_port=True, host="0.0.0.0")
     else:
-        app.run(port=int(port_env), host="::")
+        app.run(port=int(port_env), host="0.0.0.0")

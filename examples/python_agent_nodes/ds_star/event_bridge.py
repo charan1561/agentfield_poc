@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import queue
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ds_star.events import EventBus
 
@@ -24,10 +24,25 @@ class AgentFieldEventBridge(EventBus):
         super().__init__()
         self._queue: queue.Queue[Dict[str, Any]] = queue.Queue()
 
-    def emit_dict(self, **kwargs: Any) -> None:
-        super().emit_dict(**kwargs)
+    def emit_dict(
+        self,
+        type: str,
+        run_id: str,
+        node: Optional[str] = None,
+        iteration: int = 0,
+        status: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        ts: Optional[float] = None,
+    ) -> None:
+        super().emit_dict(
+            type=type, run_id=run_id, node=node,
+            iteration=iteration, status=status, payload=payload, ts=ts,
+        )
         try:
-            self._queue.put_nowait(kwargs)
+            self._queue.put_nowait({
+                "type": type, "run_id": run_id, "node": node,
+                "iteration": iteration, "status": status, "payload": payload,
+            })
         except queue.Full:
             logger.warning("Event bridge queue full, dropping event")
 
