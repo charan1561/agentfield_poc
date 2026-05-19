@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from fastapi import UploadFile, File
+from fastapi.responses import JSONResponse
 from agentfield import AIConfig, Agent
 
 if __package__ in (None, ""):
@@ -36,6 +38,32 @@ app.include_router(coding_router)
 app.include_router(verification_router)
 app.include_router(orchestration_router)
 app.include_router(meta_router)
+
+
+@app.server.post("/upload")
+async def upload_data_file(file: UploadFile = File(...)):
+    workdir = os.getenv("DS_STAR_WORKDIR", "/tmp/ds_star")
+    data_dir = os.path.join(workdir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    dest = os.path.join(data_dir, file.filename)
+    content = await file.read()
+    with open(dest, "wb") as f:
+        f.write(content)
+    return JSONResponse({"filename": file.filename, "size": len(content)})
+
+
+@app.server.get("/files")
+async def list_data_files():
+    workdir = os.getenv("DS_STAR_WORKDIR", "/tmp/ds_star")
+    data_dir = os.path.join(workdir, "data")
+    if not os.path.isdir(data_dir):
+        return JSONResponse({"files": []})
+    files = []
+    for name in os.listdir(data_dir):
+        full = os.path.join(data_dir, name)
+        if os.path.isfile(full):
+            files.append({"name": name, "size": os.path.getsize(full)})
+    return JSONResponse({"files": files})
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import {
   Activity,
   LayoutDashboard,
+  Microscope,
   Play,
   Server,
   FlaskConical,
@@ -52,6 +53,7 @@ export const navigation: NavGroup[] = [
       { title: "Playground", icon: FlaskConical, path: "/playground" },
       { title: "Runs", icon: Play, path: "/runs" },
       { title: "Agent nodes", icon: Server, path: "/agents" },
+      { title: "DS Star", icon: Microscope, path: "/ds-star" },
       {
         title: "Triggers",
         icon: Webhook,

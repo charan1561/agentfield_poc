@@ -88,6 +88,11 @@ func (s *AgentFieldServer) registerUIAPI() {
 			agentExecutionHandler := ui.NewExecutionHandler(s.storage, s.payloadStore, s.webhookDispatcher)
 			agents.GET("/:agentId/executions", agentExecutionHandler.ListExecutionsHandler)
 			agents.GET("/:agentId/executions/:executionId", agentExecutionHandler.GetExecutionDetailsHandler)
+
+			// File upload proxy (forwards multipart uploads to the agent)
+			uploadHandler := &ui.UploadProxyHandler{Storage: s.storage}
+			agents.POST("/:agentId/upload", uploadHandler.ProxyUploadHandler)
+			agents.GET("/:agentId/files", uploadHandler.ProxyListFilesHandler)
 		}
 
 		// Nodes management group - All node-related operations

@@ -15,6 +15,7 @@ import { PlaygroundPage } from "./pages/PlaygroundPage";
 import { AccessManagementPage } from "./pages/AccessManagementPage";
 import { TriggersPage } from "./pages/TriggersPage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
+import { DSStarPage } from "./pages/DSStarPage";
 import { AuthProvider } from "./contexts/AuthContext";
 import { AuthGuard } from "./components/AuthGuard";
 import { queryClient } from "./lib/query-client";
@@ -57,6 +58,7 @@ function AppContent() {
         <Route path="/access" element={<AccessManagementPage />} />
         <Route path="/triggers" element={<TriggersPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
+        <Route path="/ds-star" element={<DSStarPage />} />
 
         {/* Old → New redirects */}
         <Route path="/executions" element={<Navigate to="/runs" replace />} />
