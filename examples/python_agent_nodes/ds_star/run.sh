@@ -51,7 +51,11 @@ fi
 
 # --- ensure workdir ---
 DS_STAR_WORKDIR="${DS_STAR_WORKDIR:-/tmp/ds_star}"
-mkdir -p "${DS_STAR_WORKDIR}/data" "${DS_STAR_WORKDIR}/final"
+mkdir -p "${DS_STAR_WORKDIR}/data" "${DS_STAR_WORKDIR}/final" "${DS_STAR_WORKDIR}/final/charts"
+
+# --- install python deps ---
+echo "[pip] Installing Python dependencies..."
+pip install -q -r "${SCRIPT_DIR}/requirements.txt"
 
 # --- build UI if needed ---
 UI_DIR="${CP_DIR}/web/client"
@@ -114,7 +118,7 @@ echo ""
 echo "  Test:"
 echo "  curl -X POST http://localhost:${CP_PORT}/api/v1/reasoners/ds-star.orchestration_run_pipeline \\"
 echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"input\": {\"query\": \"Describe the data\", \"data_files\": [\"FIFA2018Statistics.csv\"], \"max_iterations\": 3}}'"
+echo "    -d '{\"input\": {\"query\": \"Describe the data\", \"data_files\": [\"FIFA2018Statistics.csv\"], \"num_strategies\": 2, \"num_code_variants\": 2, \"num_verifiers\": 2, \"strategy_max_iters\": 3}}'"
 echo "========================================="
 echo ""
 
