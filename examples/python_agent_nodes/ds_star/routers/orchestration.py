@@ -360,18 +360,68 @@ async def finalize_result(
     state = await asyncio.to_thread(agents.finalize, state)
 
     answer = state.final_answer or ""
-    summary_path = os.path.join(workdir, "final", "summary.md")
-    if (not answer or len(answer) < 100) and os.path.isfile(summary_path):
-        try:
-            with open(summary_path, "r", encoding="utf-8") as f:
-                answer = f.read().strip() or answer
-        except Exception:
-            pass
+
+    # The finalize prompt creates final/result.json with structured data.
+    # If the answer is just a status message, build markdown from result.json.
+    if not answer or len(answer) < 100:
+        import json as _json
+        for candidate in ["final/result.json", "final/summary.md"]:
+            fpath = os.path.join(workdir, candidate)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    raw = f.read().strip()
+                if candidate.endswith(".json"):
+                    obj = _json.loads(raw)
+                    answer = _format_result_json_as_markdown(obj, query)
+                elif raw:
+                    answer = raw
+                break
+            except Exception:
+                continue
 
     return {
         "final_answer": answer,
         "final_code": state.final_code,
     }
+
+
+def _format_result_json_as_markdown(obj: dict, query: str) -> str:
+    """Convert the structured result.json into readable markdown."""
+    parts: List[str] = []
+
+    summary = obj.get("analysis_summary", "")
+    if summary:
+        parts.append(f"## Summary\n\n{summary}")
+
+    data = obj.get("data")
+    if isinstance(data, dict):
+        for key, value in data.items():
+            heading = key.replace("_", " ").title()
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                cols = list(value[0].keys())
+                header = "| " + " | ".join(c.replace("_", " ").title() for c in cols) + " |"
+                sep = "| " + " | ".join("---" for _ in cols) + " |"
+                rows = []
+                for row in value:
+                    cells = " | ".join(str(row.get(c, "")) for c in cols)
+                    rows.append(f"| {cells} |")
+                parts.append(f"### {heading}\n\n{header}\n{sep}\n" + "\n".join(rows))
+            elif isinstance(value, (int, float, str)):
+                parts.append(f"**{heading}:** {value}")
+            elif isinstance(value, dict):
+                items = "\n".join(f"- **{k.replace('_', ' ').title()}:** {v}" for k, v in value.items())
+                parts.append(f"### {heading}\n\n{items}")
+            else:
+                parts.append(f"**{heading}:** {value}")
+
+    files = obj.get("files_created", [])
+    if files:
+        flist = ", ".join(f"`{f}`" for f in files)
+        parts.append(f"\n*Generated files: {flist}*")
+
+    return "\n\n".join(parts) if parts else str(obj)
 
 
 @orchestration_router.reasoner()

@@ -30,6 +30,8 @@ import { dsStarApi } from "@/services/dsStarApi";
 import type { AsyncExecuteResponse, ExecutionStatusResponse } from "@/types/execution";
 import type { WorkflowDAGLightweightResponse } from "@/types/workflows";
 import { cn } from "@/lib/utils";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type PipelinePhase = "idle" | "uploading" | "running" | "completed" | "error";
 
@@ -212,8 +214,61 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-sm whitespace-pre-wrap leading-relaxed">
-              {data.final_answer}
+            <div className="prose prose-sm max-w-none prose-invert prose-headings:text-foreground prose-p:text-muted-foreground prose-strong:text-foreground prose-code:text-foreground prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  h1: ({ children }) => <h1 className="text-lg font-semibold mb-3 mt-4 first:mt-0 text-foreground border-b border-border pb-2">{children}</h1>,
+                  h2: ({ children }) => <h2 className="text-base font-semibold mb-2 mt-3 first:mt-0 text-foreground">{children}</h2>,
+                  h3: ({ children }) => <h3 className="text-sm font-medium mb-2 mt-2 text-foreground">{children}</h3>,
+                  p: ({ children }) => <p className="mb-2 text-sm leading-relaxed text-muted-foreground">{children}</p>,
+                  ul: ({ children }) => <ul className="list-disc list-inside mb-3 text-sm space-y-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal list-inside mb-3 text-sm space-y-1">{children}</ol>,
+                  li: ({ children }) => <li className="leading-relaxed text-muted-foreground">{children}</li>,
+                  strong: ({ children }) => <strong className="text-foreground font-semibold">{children}</strong>,
+                  em: ({ children }) => <em className="text-muted-foreground">{children}</em>,
+                  table: ({ children }) => (
+                    <div className="overflow-auto mb-3 border border-border rounded-lg">
+                      <table className="min-w-full text-sm">{children}</table>
+                    </div>
+                  ),
+                  thead: ({ children }) => <thead className="bg-muted/50">{children}</thead>,
+                  th: ({ children }) => (
+                    <th className="border-b border-border px-3 py-2 text-left text-xs font-semibold text-foreground uppercase tracking-wider">
+                      {children}
+                    </th>
+                  ),
+                  td: ({ children }) => (
+                    <td className="border-b border-border/50 px-3 py-2 text-sm text-muted-foreground">
+                      {children}
+                    </td>
+                  ),
+                  tr: ({ children }) => <tr className="hover:bg-muted/30 transition-colors">{children}</tr>,
+                  blockquote: ({ children }) => (
+                    <blockquote className="border-l-4 border-accent-primary pl-3 italic text-muted-foreground mb-2 bg-muted/30 py-1 rounded-r">
+                      {children}
+                    </blockquote>
+                  ),
+                  code: ({ children, className }) => {
+                    const isBlock = className?.includes("language-");
+                    return isBlock ? (
+                      <code className={className}>{children}</code>
+                    ) : (
+                      <code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono text-foreground border border-border">
+                        {children}
+                      </code>
+                    );
+                  },
+                  pre: ({ children }) => (
+                    <pre className="bg-muted/50 border border-border rounded-lg p-3 text-xs overflow-x-auto mb-3 font-mono">
+                      {children}
+                    </pre>
+                  ),
+                  hr: () => <hr className="border-border my-4" />,
+                }}
+              >
+                {data.final_answer}
+              </ReactMarkdown>
             </div>
           </CardContent>
         </Card>
@@ -237,7 +292,7 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
           </CardHeader>
           {codeOpen && (
             <CardContent>
-              <pre className="text-xs bg-muted/50 rounded-md p-3 overflow-x-auto max-h-96">
+              <pre className="text-xs bg-muted/50 border border-border rounded-lg p-4 overflow-x-auto max-h-96 font-mono leading-relaxed">
                 <code>{data.final_code}</code>
               </pre>
             </CardContent>
@@ -254,10 +309,13 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <ol className="text-sm space-y-1 list-decimal list-inside">
+            <ol className="text-sm space-y-2 list-none">
               {data.plans.map((step: string, i: number) => (
-                <li key={i} className="text-muted-foreground">
-                  {step}
+                <li key={i} className="flex gap-3 text-muted-foreground">
+                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-muted flex items-center justify-center text-xs font-semibold text-foreground">
+                    {i + 1}
+                  </span>
+                  <span className="leading-relaxed pt-0.5">{step}</span>
                 </li>
               ))}
             </ol>
