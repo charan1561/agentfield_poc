@@ -26,6 +26,7 @@ import {
   Layers,
   Timer,
   Zap,
+  Download,
 } from "lucide-react";
 import { WorkflowDAGViewer } from "@/components/WorkflowDAG";
 import { StepDetail } from "@/components/StepDetail";
@@ -260,8 +261,130 @@ function StrategySummary({ data }: { data: Record<string, any> }) {
   );
 }
 
+async function buildReportHTML(
+  data: Record<string, any>,
+  charts: ChartInfo[],
+): Promise<string> {
+  // Fetch chart images and convert to base64
+  const chartEmbeds: { name: string; dataUrl: string }[] = [];
+  for (const chart of charts) {
+    try {
+      const resp = await fetch(dsStarApi.getChartUrl(chart.name));
+      const blob = await resp.blob();
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.readAsDataURL(blob);
+      });
+      chartEmbeds.push({ name: chart.name, dataUrl });
+    } catch {
+      // skip failed chart fetches
+    }
+  }
+
+  const markdown = data.final_answer || "";
+  const score = data.run_score != null
+    ? (typeof data.run_score === "object" ? (data.run_score as any).score : data.run_score)
+    : null;
+
+  // Replace markdown image references with embedded base64
+  let processedMarkdown = markdown;
+  for (const { name, dataUrl } of chartEmbeds) {
+    processedMarkdown = processedMarkdown.replace(
+      new RegExp(`!\\[([^\\]]*)\\]\\(charts/${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "g"),
+      `<img src="${dataUrl}" alt="$1" style="max-width:100%;border-radius:8px;margin:16px 0;" />`
+    );
+  }
+
+  const chartsHTML = chartEmbeds.length > 0
+    ? `<h2>Visualizations</h2>
+       <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin:24px 0;">
+         ${chartEmbeds.map(c => `<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+           <img src="${c.dataUrl}" alt="${c.name}" style="width:100%;display:block;" />
+           <div style="padding:6px 10px;font-size:12px;color:#6b7280;background:#f9fafb;">${c.name}</div>
+         </div>`).join("\n")}
+       </div>`
+    : "";
+
+  const plansHTML = data.plans?.length
+    ? `<h2>Analysis Plan</h2><ol>${data.plans.map((s: string) => `<li>${s}</li>`).join("")}</ol>`
+    : "";
+
+  const codeHTML = data.final_code
+    ? `<details><summary style="cursor:pointer;font-weight:600;margin:16px 0;">Generated Code</summary>
+       <pre style="background:#1e1e2e;color:#cdd6f4;padding:16px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.5;"><code>${data.final_code.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</code></pre></details>`
+    : "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS Star Analysis Report</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #1f2937; max-width: 900px; margin: 0 auto; padding: 40px 24px; background: #fff; }
+  h1 { font-size: 28px; margin-bottom: 8px; color: #111827; }
+  h2 { font-size: 20px; margin: 32px 0 12px; color: #111827; border-bottom: 2px solid #e5e7eb; padding-bottom: 6px; }
+  h3 { font-size: 16px; margin: 20px 0 8px; color: #374151; }
+  p { margin-bottom: 12px; color: #4b5563; }
+  ul, ol { margin: 8px 0 16px 24px; color: #4b5563; }
+  li { margin-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #e5e7eb; padding: 8px 12px; text-align: left; font-size: 14px; }
+  th { background: #f9fafb; font-weight: 600; color: #374151; }
+  tr:hover { background: #f9fafb; }
+  code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 4px solid #6366f1; padding: 8px 16px; margin: 12px 0; background: #f5f3ff; color: #4338ca; border-radius: 0 6px 6px 0; }
+  strong { color: #111827; }
+  hr { border: none; border-top: 1px solid #e5e7eb; margin: 24px 0; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 24px 0; }
+  .stat { text-align: center; padding: 16px; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; }
+  .stat-value { font-size: 28px; font-weight: 700; }
+  .stat-label { font-size: 12px; color: #6b7280; margin-top: 4px; }
+  .green { color: #16a34a; } .amber { color: #d97706; } .red { color: #dc2626; } .blue { color: #6366f1; }
+  .header-meta { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+  img { max-width: 100%; }
+  @media print { body { padding: 20px; } .stats { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<h1>DS Star Analysis Report</h1>
+<p class="header-meta">Generated ${new Date().toLocaleString()} | ${data.strategies_explored ?? "-"} strategies | ${data.total_ai_calls ?? "-"} AI calls${data.elapsed_seconds ? ` | ${Math.round(data.elapsed_seconds)}s` : ""}</p>
+
+<div class="stats">
+  <div class="stat"><div class="stat-value">${data.iterations ?? "-"}</div><div class="stat-label">Iterations</div></div>
+  <div class="stat"><div class="stat-value blue">${data.total_ai_calls ?? "-"}</div><div class="stat-label">AI Calls</div></div>
+  <div class="stat"><div class="stat-value ${data.verified ? "green" : "amber"}">${data.verified ? "Yes" : "No"}</div><div class="stat-label">Verified</div></div>
+  <div class="stat"><div class="stat-value ${score != null && score >= 0.7 ? "green" : score != null && score >= 0.4 ? "amber" : "red"}">${score != null ? Number(score).toFixed(2) : "-"}</div><div class="stat-label">Score</div></div>
+</div>
+
+${processedMarkdown
+  .replace(/^# /gm, "<h1>").replace(/<h1>(.*)$/gm, "<h1>$1</h1>")
+  .replace(/^## /gm, "<h2>").replace(/<h2>(.*)$/gm, "<h2>$1</h2>")
+  .replace(/^### /gm, "<h3>").replace(/<h3>(.*)$/gm, "<h3>$1</h3>")
+  .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+  .replace(/^- (.*)$/gm, "<li>$1</li>")
+  .replace(/(<li>.*<\/li>\n?)+/g, "<ul>$&</ul>")
+  .replace(/\n\n/g, "</p><p>")
+  .replace(/^(?!<[hupold])/gm, "<p>")
+  .replace(/<p><\/p>/g, "")
+}
+
+${chartsHTML}
+${plansHTML}
+${codeHTML}
+
+<hr />
+<p style="font-size:12px;color:#9ca3af;text-align:center;">Generated by DS Star — AgentField Data Science Agent</p>
+</body>
+</html>`;
+}
+
 function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | null; charts: ChartInfo[] }) {
   const [codeOpen, setCodeOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   if (!result?.result) return null;
 
@@ -275,32 +398,43 @@ function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | nu
     <div className="space-y-4">
       <StrategySummary data={data} />
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-2">
         <Card variant="muted" interactive={false}>
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold">
+          <CardContent className="p-3 text-center">
+            <div className="text-xl font-bold">
               {data.iterations ?? "-"}
             </div>
-            <div className="text-xs text-muted-foreground mt-1">Iterations</div>
+            <div className="text-[10px] text-muted-foreground mt-1">Iterations</div>
           </CardContent>
         </Card>
         <Card variant="muted" interactive={false}>
-          <CardContent className="p-4 text-center">
-            <div className={cn("text-2xl font-bold", data.verified ? "text-green-500" : "text-amber-500")}>
+          <CardContent className="p-3 text-center">
+            <div className="text-xl font-bold text-primary">
+              {data.total_ai_calls ?? "-"}
+            </div>
+            <div className="text-[10px] text-muted-foreground mt-1 flex items-center justify-center gap-0.5">
+              <Zap className="h-2.5 w-2.5" />
+              AI Calls
+            </div>
+          </CardContent>
+        </Card>
+        <Card variant="muted" interactive={false}>
+          <CardContent className="p-3 text-center">
+            <div className={cn("text-xl font-bold", data.verified ? "text-green-500" : "text-amber-500")}>
               {data.verified ? "Yes" : "No"}
             </div>
-            <div className="text-xs text-muted-foreground mt-1">Verified</div>
+            <div className="text-[10px] text-muted-foreground mt-1">Verified</div>
           </CardContent>
         </Card>
         <Card variant="muted" interactive={false}>
-          <CardContent className="p-4 text-center">
+          <CardContent className="p-3 text-center">
             <div className={cn(
-              "text-2xl font-bold",
+              "text-xl font-bold",
               !isNaN(score) && score >= 0.7 ? "text-green-500" : !isNaN(score) && score >= 0.4 ? "text-amber-500" : "text-destructive"
             )}>
               {!isNaN(score) ? score.toFixed(2) : "-"}
             </div>
-            <div className="text-xs text-muted-foreground mt-1">Score</div>
+            <div className="text-[10px] text-muted-foreground mt-1">Score</div>
           </CardContent>
         </Card>
       </div>
@@ -308,10 +442,36 @@ function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | nu
       {data.final_answer && (
         <Card variant="surface" interactive={false}>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              Final Answer
-            </CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <FileText className="h-4 w-4" />
+                Final Answer
+              </CardTitle>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={downloading}
+                onClick={async () => {
+                  setDownloading(true);
+                  try {
+                    const html = await buildReportHTML(data, charts);
+                    const blob = new Blob([html], { type: "text/html" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `ds-star-report-${new Date().toISOString().slice(0, 10)}.html`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } finally {
+                    setDownloading(false);
+                  }
+                }}
+                className="h-7 text-xs gap-1.5"
+              >
+                {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                Download Report
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
             <div className="prose prose-sm max-w-none prose-invert prose-headings:text-foreground prose-p:text-muted-foreground prose-strong:text-foreground prose-code:text-foreground prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
