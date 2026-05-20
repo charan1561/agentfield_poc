@@ -166,6 +166,10 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
   if (!result?.result) return null;
 
   const data = result.result;
+  const rawScore = typeof data.run_score === "object" && data.run_score !== null
+    ? (data.run_score as Record<string, unknown>).score
+    : data.run_score;
+  const score = rawScore != null ? Number(rawScore) : NaN;
 
   return (
     <div className="space-y-4">
@@ -190,9 +194,9 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
           <CardContent className="p-4 text-center">
             <div className={cn(
               "text-2xl font-bold",
-              Number(data.run_score ?? 0) >= 0.7 ? "text-green-500" : Number(data.run_score ?? 0) >= 0.4 ? "text-amber-500" : "text-destructive"
+              !isNaN(score) && score >= 0.7 ? "text-green-500" : !isNaN(score) && score >= 0.4 ? "text-amber-500" : "text-destructive"
             )}>
-              {data.run_score != null ? Number(data.run_score).toFixed(2) : "-"}
+              {!isNaN(score) ? score.toFixed(2) : "-"}
             </div>
             <div className="text-xs text-muted-foreground mt-1">Score</div>
           </CardContent>

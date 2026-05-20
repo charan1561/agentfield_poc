@@ -359,8 +359,17 @@ async def finalize_result(
 
     state = await asyncio.to_thread(agents.finalize, state)
 
+    answer = state.final_answer or ""
+    summary_path = os.path.join(workdir, "final", "summary.md")
+    if (not answer or len(answer) < 100) and os.path.isfile(summary_path):
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                answer = f.read().strip() or answer
+        except Exception:
+            pass
+
     return {
-        "final_answer": state.final_answer,
+        "final_answer": answer,
         "final_code": state.final_code,
     }
 
@@ -598,12 +607,15 @@ async def run_pipeline(
 
     logger.info("Pipeline completed: iterations=%d, verified=%s", iteration, verified)
 
+    score_obj = ml["run_score"]
+    run_score = score_obj.get("score", 0.5) if isinstance(score_obj, dict) else score_obj
+
     return {
         "final_answer": final["final_answer"],
         "final_code": final["final_code"],
         "iterations": iteration,
         "verified": verified,
         "plans": plans,
-        "run_score": ml["run_score"],
+        "run_score": run_score,
         "failure_type": ml["failure_type"],
     }
