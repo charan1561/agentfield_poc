@@ -22,11 +22,16 @@ import {
   Code2,
   FileText,
   BarChart3,
+  Image,
+  Layers,
+  Timer,
+  Zap,
 } from "lucide-react";
 import { WorkflowDAGViewer } from "@/components/WorkflowDAG";
 import { StepDetail } from "@/components/StepDetail";
 import { getWorkflowDAGLightweight } from "@/services/workflowsApi";
 import { dsStarApi } from "@/services/dsStarApi";
+import type { ChartInfo } from "@/services/dsStarApi";
 import type { AsyncExecuteResponse, ExecutionStatusResponse } from "@/types/execution";
 import type { WorkflowDAGLightweightResponse } from "@/types/workflows";
 import { cn } from "@/lib/utils";
@@ -162,7 +167,100 @@ function FileUploadZone({
   );
 }
 
-function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
+function ChartsGrid({ charts }: { charts: ChartInfo[] }) {
+  const [selectedChart, setSelectedChart] = useState<string | null>(null);
+
+  if (charts.length === 0) return null;
+
+  return (
+    <Card variant="surface" interactive={false}>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Image className="h-4 w-4" />
+          Visualizations ({charts.length})
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-2 gap-3">
+          {charts.map((chart) => (
+            <button
+              key={chart.name}
+              onClick={() => setSelectedChart(selectedChart === chart.name ? null : chart.name)}
+              className={cn(
+                "border rounded-lg overflow-hidden transition-all hover:ring-2 hover:ring-primary/40",
+                selectedChart === chart.name ? "ring-2 ring-primary col-span-2" : "border-border/40"
+              )}
+            >
+              <img
+                src={dsStarApi.getChartUrl(chart.name)}
+                alt={chart.name}
+                className="w-full h-auto bg-white"
+                loading="lazy"
+              />
+              <div className="px-2 py-1.5 bg-muted/40 text-xs text-muted-foreground truncate">
+                {chart.name}
+              </div>
+            </button>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function StrategySummary({ data }: { data: Record<string, any> }) {
+  const strategies = data.strategies_explored;
+  const aiCalls = data.total_ai_calls;
+  const elapsed = data.elapsed_seconds;
+
+  if (!strategies && !aiCalls) return null;
+
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      {strategies != null && (
+        <Card variant="muted" interactive={false}>
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold text-primary">
+              {strategies}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1 flex items-center justify-center gap-1">
+              <Layers className="h-3 w-3" />
+              Strategies
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      {aiCalls != null && (
+        <Card variant="muted" interactive={false}>
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold text-primary">
+              {aiCalls}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1 flex items-center justify-center gap-1">
+              <Zap className="h-3 w-3" />
+              AI Calls
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      {elapsed != null && (
+        <Card variant="muted" interactive={false}>
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold">
+              {elapsed < 60 ? `${Math.round(elapsed)}s` : `${Math.floor(elapsed / 60)}m ${Math.round(elapsed % 60)}s`}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1 flex items-center justify-center gap-1">
+              <Timer className="h-3 w-3" />
+              Elapsed
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | null; charts: ChartInfo[] }) {
   const [codeOpen, setCodeOpen] = useState(false);
 
   if (!result?.result) return null;
@@ -175,6 +273,8 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
 
   return (
     <div className="space-y-4">
+      <StrategySummary data={data} />
+
       <div className="grid grid-cols-3 gap-3">
         <Card variant="muted" interactive={false}>
           <CardContent className="p-4 text-center">
@@ -300,6 +400,8 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
         </Card>
       )}
 
+      <ChartsGrid charts={charts} />
+
       {data.plans && data.plans.length > 0 && (
         <Card variant="surface" interactive={false}>
           <CardHeader className="pb-2">
@@ -331,8 +433,13 @@ export function DSStarPage() {
   const [query, setQuery] = useState("");
   const [maxIterations, setMaxIterations] = useState(20);
   const [guidelines, setGuidelines] = useState("");
+  const [numStrategies, setNumStrategies] = useState(5);
+  const [strategyMaxIters, setStrategyMaxIters] = useState(5);
+  const [numCodeVariants, setNumCodeVariants] = useState(3);
+  const [numVerifiers, setNumVerifiers] = useState(3);
   const [phase, setPhase] = useState<PipelinePhase>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [charts, setCharts] = useState<ChartInfo[]>([]);
 
   const [executionId, setExecutionId] = useState<string | null>(null);
   const [workflowId, setWorkflowId] = useState<string | null>(null);
@@ -412,6 +519,10 @@ export function DSStarPage() {
         data_files: readyFiles,
         max_iterations: maxIterations,
         guidelines: guidelines.trim() || undefined,
+        num_strategies: numStrategies,
+        strategy_max_iters: strategyMaxIters,
+        num_code_variants: numCodeVariants,
+        num_verifiers: numVerifiers,
       });
       setExecutionId(resp.execution_id);
       setWorkflowId(resp.workflow_id);
@@ -420,7 +531,7 @@ export function DSStarPage() {
       setPhase("error");
       setErrorMsg(err.message ?? "Failed to start pipeline");
     }
-  }, [canExecute, query, readyFiles, maxIterations, guidelines]);
+  }, [canExecute, query, readyFiles, maxIterations, guidelines, numStrategies, strategyMaxIters, numCodeVariants, numVerifiers]);
 
   // Poll execution status
   const { data: execStatus } = useQuery<ExecutionStatusResponse>({
@@ -438,6 +549,7 @@ export function DSStarPage() {
     if (!execStatus) return;
     if (execStatus.status === "succeeded") {
       setPhase("completed");
+      dsStarApi.listCharts().then(setCharts).catch(() => {});
     } else if (execStatus.status === "failed" || execStatus.status === "error") {
       setPhase("error");
       setErrorMsg(execStatus.error ?? "Pipeline failed");
@@ -550,6 +662,83 @@ export function DSStarPage() {
 
                 {showAdvanced && (
                   <div className="space-y-3 pt-1">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">
+                          Strategies ({numStrategies})
+                        </label>
+                        <input
+                          type="range"
+                          min={2}
+                          max={5}
+                          value={numStrategies}
+                          onChange={(e) => setNumStrategies(parseInt(e.target.value))}
+                          disabled={phase === "running"}
+                          className="w-full accent-primary"
+                        />
+                        <div className="flex justify-between text-[10px] text-muted-foreground">
+                          <span>2</span><span>5</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">
+                          Iters/Strategy ({strategyMaxIters})
+                        </label>
+                        <input
+                          type="range"
+                          min={3}
+                          max={10}
+                          value={strategyMaxIters}
+                          onChange={(e) => setStrategyMaxIters(parseInt(e.target.value))}
+                          disabled={phase === "running"}
+                          className="w-full accent-primary"
+                        />
+                        <div className="flex justify-between text-[10px] text-muted-foreground">
+                          <span>3</span><span>10</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">
+                          Code Variants ({numCodeVariants})
+                        </label>
+                        <input
+                          type="range"
+                          min={1}
+                          max={5}
+                          value={numCodeVariants}
+                          onChange={(e) => setNumCodeVariants(parseInt(e.target.value))}
+                          disabled={phase === "running"}
+                          className="w-full accent-primary"
+                        />
+                        <div className="flex justify-between text-[10px] text-muted-foreground">
+                          <span>1</span><span>5</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">
+                          Verifiers ({numVerifiers})
+                        </label>
+                        <input
+                          type="range"
+                          min={1}
+                          max={5}
+                          value={numVerifiers}
+                          onChange={(e) => setNumVerifiers(parseInt(e.target.value))}
+                          disabled={phase === "running"}
+                          className="w-full accent-primary"
+                        />
+                        <div className="flex justify-between text-[10px] text-muted-foreground">
+                          <span>1</span><span>5</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="rounded-md bg-muted/40 border border-border/40 px-3 py-2">
+                      <p className="text-[10px] text-muted-foreground">
+                        Est. AI calls: ~{Math.round(
+                          30 + 1 + numStrategies * (1 + numCodeVariants + strategyMaxIters * (numVerifiers + 1 + 1 + numCodeVariants)) + 6 + 6 + 24 + 17 + 3
+                        )}
+                      </p>
+                    </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">
                         Max Iterations
@@ -621,7 +810,7 @@ export function DSStarPage() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <ResultsPanel result={execStatus} />
+                  <ResultsPanel result={execStatus} charts={charts} />
                 </CardContent>
               </Card>
             )}

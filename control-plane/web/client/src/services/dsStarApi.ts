@@ -29,6 +29,15 @@ export interface DSStarPipelineRequest {
   max_iterations?: number;
   guidelines?: string;
   data_dir?: string;
+  num_strategies?: number;
+  strategy_max_iters?: number;
+  num_code_variants?: number;
+  num_verifiers?: number;
+}
+
+export interface ChartInfo {
+  name: string;
+  url: string;
 }
 
 export interface DSStarPipelineResult {
@@ -38,6 +47,11 @@ export interface DSStarPipelineResult {
   verified?: boolean;
   run_score?: number;
   plans?: string[];
+  charts?: string[];
+  strategies_explored?: number;
+  total_ai_calls?: number;
+  elapsed_seconds?: number;
+  failure_type?: string;
 }
 
 const AGENT_ID = 'ds-star';
@@ -78,5 +92,18 @@ export const dsStarApi = {
 
   getWorkflowDAG: async (runId: string): Promise<WorkflowDAGLightweightResponse> => {
     return getWorkflowDAGLightweight(runId);
+  },
+
+  listCharts: async (): Promise<ChartInfo[]> => {
+    const resp = await fetch(`${API_BASE_URL}/agents/${AGENT_ID}/api/charts`, {
+      headers: authHeaders(),
+    });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return data.charts ?? [];
+  },
+
+  getChartUrl: (chartName: string): string => {
+    return `${API_BASE_URL}/agents/${AGENT_ID}/charts/${chartName}`;
   },
 };

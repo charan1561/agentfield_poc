@@ -15,6 +15,10 @@ from .prompts import (
     render_debug_summarize_prompt,
     render_debug_fix_analyzer_prompt,
     render_debug_fix_solution_prompt,
+    render_perspective_analysis_prompt,
+    render_ensemble_verifier_prompt,
+    render_code_variant_prompt,
+    render_chart_generation_prompt,
 )
 from .executor import run_python_code
 from .events import EventBus
@@ -743,6 +747,88 @@ The analysis completed but output generation was incomplete.
 
                 except Exception as e:
                     print(f"[DS-STAR:{rid}] Warning: Could not update result.json: {e}")
+
+    # --- v3 parallel methods ---
+
+    def analyze_single_file(self, filename: str, perspective: str, query: str, data_dir: str = "data") -> Dict[str, Any]:
+        self._log_step(f"analyze_{perspective}")
+        self.logger.info(f"Analyzing {filename} [{perspective}]...")
+        msgs = render_perspective_analysis_prompt(query, filename, perspective, data_dir)
+        resp = self._chat(msgs)
+        code = extract_first_code_block(resp)
+        fixed_code, result = self._debug_analyzer_until_executes(filename, code, max_tries=3)
+        summary = (result.stdout or "").strip()
+        if not summary:
+            summary = f"[Empty stdout]\n{truncate_text(result.stderr, 1000)}"
+        return {"filename": filename, "perspective": perspective, "summary": truncate_text(summary, 4000)}
+
+    def verify_from_perspective(
+        self,
+        perspective: str,
+        query: str,
+        code: str,
+        result_text: str,
+        plans: List[str],
+    ) -> Dict[str, Any]:
+        self._log_step(f"verify_{perspective}")
+        msgs = render_ensemble_verifier_prompt(query, code, result_text, plans, perspective)
+        resp = self._chat(msgs).strip()
+        import json as _json
+        try:
+            parsed = _json.loads(resp)
+        except Exception:
+            verified = "true" in resp.lower() or "yes" in resp.lower()
+            parsed = {"verified": verified, "reasoning": resp[:200], "confidence": 0.5}
+        return {
+            "perspective": perspective,
+            "verified": bool(parsed.get("verified", False)),
+            "reasoning": parsed.get("reasoning", ""),
+            "confidence": float(parsed.get("confidence", 0.5)),
+        }
+
+    def generate_code_variant(
+        self,
+        variant_id: str,
+        plan_step: str,
+        file_summaries: List[str],
+        filenames: List[str],
+        base_code: str = "",
+        strategies: str = "",
+    ) -> Dict[str, Any]:
+        self._log_step(f"code_{variant_id}")
+        msgs = render_code_variant_prompt(plan_step, file_summaries, filenames, variant_id, base_code, strategies)
+        resp = self._chat(msgs)
+        code = extract_first_code_block(resp)
+        fixed_code, result = self._debug_solution_until_executes(file_summaries, filenames, code, max_tries=2)
+        return {
+            "variant_id": variant_id,
+            "code": fixed_code,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
+            "exit_code": result.exit_code,
+            "artifacts": result.artifacts,
+        }
+
+    def generate_chart_code(
+        self,
+        chart_spec: Dict[str, Any],
+        file_summaries: List[str],
+        filenames: List[str],
+    ) -> Dict[str, Any]:
+        self._log_step("chart_gen")
+        msgs = render_chart_generation_prompt(chart_spec, file_summaries, filenames)
+        resp = self._chat(msgs)
+        code = extract_first_code_block(resp)
+        fixed_code, result = self._debug_solution_until_executes(file_summaries, filenames, code, max_tries=2)
+        out_file = chart_spec.get("filename", "chart.png")
+        chart_path = os.path.join(self.workdir, "final", "charts", out_file)
+        success = result.exit_code == 0 and os.path.isfile(chart_path)
+        return {
+            "filename": out_file,
+            "success": success,
+            "code": fixed_code,
+            "error": result.stderr if not success else "",
+        }
 
     # --- Orchestration Steps for Router Decisions ---
 

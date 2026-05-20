@@ -311,6 +311,383 @@ REQUIREMENTS:
 All files/documents are in `data/` directory."""
     return [{"role": "user", "content": user}]
 
+
+# ──────────────────────────────────────────────────────────────
+# v3 prompts: parallel multi-strategy orchestration + visualization
+# ──────────────────────────────────────────────────────────────
+
+
+def render_strategy_generation_prompt(
+    query: str,
+    file_summaries: List[str],
+    filenames: List[str],
+    guidelines: str,
+    past_strategies: str = "",
+    num_strategies: int = 5,
+) -> List[Dict[str, Any]]:
+    given_data_blocks = []
+    for fn, summ in zip(filenames, file_summaries):
+        given_data_blocks.append(f"{fn}\n{summ}")
+    given_data = "\n".join(given_data_blocks)
+    past_block = f"\n# Strategies from past runs (for reference only)\n{past_strategies}\n" if past_strategies else ""
+
+    user = f"""You are an expert data analyst. Your task is to generate {num_strategies} distinct analysis strategies.
+
+# Question
+{query}
+
+# Available data
+{given_data}
+
+# Guidelines
+{guidelines}{past_block}
+
+# Your task
+Generate exactly {num_strategies} different strategies to answer the question. Each strategy should take a fundamentally different approach:
+- Different data transformations (aggregation vs filtering vs pivoting)
+- Different statistical methods (descriptive vs inferential vs ML-based)
+- Different angles of analysis (top-down vs bottom-up vs comparison-focused)
+
+Return a JSON array of strategy descriptions. Each description should be 2-3 sentences explaining the approach.
+
+Example format:
+["Strategy 1: Aggregate data by category and compute summary statistics to identify dominant patterns...", "Strategy 2: Apply correlation analysis between numeric columns to discover hidden relationships...", ...]
+
+Return ONLY the JSON array, no other text."""
+    return [{"role": "user", "content": user}]
+
+
+def render_perspective_analysis_prompt(
+    query: str,
+    filename: str,
+    perspective: str,
+    data_dir: str = "data",
+) -> List[Dict[str, Any]]:
+    perspective_instructions = {
+        "statistical_profile": (
+            "Generate a Python script that produces a STATISTICAL PROFILE of the file:\n"
+            "- Column names, dtypes, row count\n"
+            "- For numeric columns: min, max, mean, median, std, null count, distribution shape\n"
+            "- For categorical columns: unique count, top-5 values with frequencies\n"
+            "- Missing value percentages per column\n"
+            "- Outlier detection (values beyond 3 std from mean)"
+        ),
+        "relationships_correlations": (
+            "Generate a Python script that analyzes RELATIONSHIPS AND CORRELATIONS:\n"
+            "- Correlation matrix for numeric columns (print top-10 strongest pairs)\n"
+            "- Cross-tabulation of key categorical columns\n"
+            "- Group-by aggregations that reveal patterns\n"
+            "- Value distributions across categories"
+        ),
+        "data_quality": (
+            "Generate a Python script that assesses DATA QUALITY AND INTEGRITY:\n"
+            "- Duplicate row detection and counts\n"
+            "- Null/missing value patterns (which columns, which rows)\n"
+            "- Data type consistency (mixed types in columns)\n"
+            "- Value range validation (negative values where unexpected, future dates, etc.)\n"
+            "- Encoding issues or special characters"
+        ),
+    }
+    instructions = perspective_instructions.get(perspective, perspective_instructions["statistical_profile"])
+
+    user = f"""You are an expert data analyst.
+{instructions}
+
+# File to analyze
+{filename} (located in `{data_dir}/` directory)
+
+# Context question (for relevance)
+{query}
+
+# Requirements
+- The script must be a single-file, self-contained Python program
+- Print all findings to stdout in a structured, readable format
+- Use pandas for data loading
+- Do not use try/except to hide errors
+- All files are in `{data_dir}/` directory
+- Your response should contain ONLY a single code block"""
+    return [{"role": "user", "content": user}]
+
+
+VARIANT_HINTS = {
+    "v0": "Use pandas as the primary library. Prefer DataFrame operations, groupby, pivot_table.",
+    "v1": "Use numpy for numerical computation where possible. Prefer vectorized operations.",
+    "v2": "Use scikit-learn utilities where applicable (preprocessing, metrics, decomposition).",
+    "v3": "Use a functional approach with map/filter/reduce patterns where applicable.",
+    "v4": "Prioritize visual output and summary statistics. Generate intermediate print statements.",
+}
+
+
+def render_code_variant_prompt(
+    plan_step: str,
+    file_summaries: List[str],
+    filenames: List[str],
+    variant_id: str,
+    base_code: str = "",
+    strategies: str = "",
+) -> List[Dict[str, Any]]:
+    given_data_blocks = []
+    for fn, summ in zip(filenames, file_summaries):
+        given_data_blocks.append(f"{fn}\n{summ}")
+    given_data = "\n".join(given_data_blocks)
+    hint = VARIANT_HINTS.get(variant_id, VARIANT_HINTS["v0"])
+    context_block = f"\n# Context from past runs\n{strategies}\n" if strategies else ""
+    base_block = f"\n# Base code (implement on top of this)\n```python\n{base_code}\n```\n" if base_code else ""
+
+    user = f"""You are an expert data analyst.
+# Given data
+{given_data}
+{base_block}
+# Plan to implement
+{plan_step}
+{context_block}
+# Implementation hint
+{hint}
+
+# Your task
+Implement the plan step. Your response must be a single Python code block.
+All files/documents are in `data/` directory.
+
+# CRITICAL: File Creation Rules
+- ONLY create CSV files when you have data rows (len(df) > 0)
+- Use os.makedirs("final", exist_ok=True) before creating files
+- Print results to stdout for verification
+- NEVER create empty CSV files with only headers"""
+    return [{"role": "user", "content": user}]
+
+
+def render_ensemble_verifier_prompt(
+    query: str,
+    code: str,
+    result: str,
+    plans: List[str],
+    perspective: str,
+) -> List[Dict[str, Any]]:
+    plans_str = "\n".join([f"{i+1}. {step}" for i, step in enumerate(plans)])
+
+    perspective_instructions = {
+        "statistical": (
+            "Focus on STATISTICAL CORRECTNESS:\n"
+            "- Are calculations correct (sums, averages, percentages)?\n"
+            "- Are aggregations applied to the right columns?\n"
+            "- Are results numerically plausible given the data?"
+        ),
+        "logical": (
+            "Focus on LOGICAL COMPLETENESS:\n"
+            "- Does the analysis cover all aspects of the question?\n"
+            "- Are there logical gaps or missing steps?\n"
+            "- Does the code handle edge cases (empty data, nulls)?"
+        ),
+        "query_alignment": (
+            "Focus on QUERY ALIGNMENT:\n"
+            "- Does the output directly answer the user's question?\n"
+            "- Is the information presented in a useful format?\n"
+            "- Would a human reading the output understand the answer?"
+        ),
+    }
+    instructions = perspective_instructions.get(perspective, perspective_instructions["query_alignment"])
+
+    user = f"""You are an expert data analyst acting as a quality reviewer.
+
+{instructions}
+
+# Question
+{query}
+
+# Analysis Plan
+{plans_str}
+
+# Code
+```python
+{code}
+```
+
+# Execution Output
+{result[:2500]}
+
+# Your task
+Evaluate the analysis from your specific perspective. Respond with a JSON object:
+{{"verified": true/false, "reasoning": "brief explanation", "confidence": 0.0-1.0}}
+
+Return ONLY the JSON object."""
+    return [{"role": "user", "content": user}]
+
+
+def render_visualization_planner_prompt(
+    query: str,
+    file_summaries: List[str],
+    filenames: List[str],
+    execution_stdout: str,
+) -> List[Dict[str, Any]]:
+    given_data_blocks = []
+    for fn, summ in zip(filenames, file_summaries):
+        given_data_blocks.append(f"{fn}\n{summ}")
+    given_data = "\n".join(given_data_blocks)
+
+    user = f"""You are an expert data visualization specialist.
+
+# Question
+{query}
+
+# Available data
+{given_data}
+
+# Analysis results
+{execution_stdout[:2500]}
+
+# Your task
+Plan 8-12 visualizations that best communicate the analysis findings. For each chart, specify:
+- chart_type: one of bar, line, scatter, heatmap, box, pie, histogram, correlation_matrix, stacked_bar, grouped_bar, area, violin
+- title: descriptive chart title
+- description: what insight the chart communicates (1 sentence)
+- data_columns: list of column names to use
+- filename: output filename (e.g., "chart_01_distribution.png")
+
+Return a JSON array of chart specifications.
+
+Example:
+[
+  {{"chart_type": "bar", "title": "Distribution by Category", "description": "Shows count of items per category", "data_columns": ["category", "count"], "filename": "chart_01_category_distribution.png"}},
+  ...
+]
+
+Return ONLY the JSON array."""
+    return [{"role": "user", "content": user}]
+
+
+def render_chart_generation_prompt(
+    chart_spec: Dict[str, Any],
+    file_summaries: List[str],
+    filenames: List[str],
+) -> List[Dict[str, Any]]:
+    given_data_blocks = []
+    for fn, summ in zip(filenames, file_summaries):
+        given_data_blocks.append(f"{fn}\n{summ}")
+    given_data = "\n".join(given_data_blocks)
+    out_filename = chart_spec.get("filename", "chart.png")
+
+    user = f"""You are an expert data visualization engineer.
+
+# Available data
+{given_data}
+
+# Chart specification
+- Type: {chart_spec.get("chart_type", "bar")}
+- Title: {chart_spec.get("title", "Chart")}
+- Description: {chart_spec.get("description", "")}
+- Data columns: {chart_spec.get("data_columns", [])}
+- Output file: final/charts/{out_filename}
+
+# Your task
+Generate a self-contained Python script that creates this chart.
+
+# REQUIREMENTS
+1. import matplotlib; matplotlib.use('Agg')  # MUST be first matplotlib import
+2. import matplotlib.pyplot as plt
+3. import seaborn as sns (for enhanced styling)
+4. Use pandas to load data from data/ directory
+5. os.makedirs("final/charts", exist_ok=True)
+6. plt.figure(figsize=(10, 6))
+7. Use a clean, professional style (sns.set_theme())
+8. Add proper labels, title, legend where applicable
+9. plt.tight_layout()
+10. plt.savefig("final/charts/{out_filename}", dpi=150, bbox_inches='tight')
+11. plt.close()
+12. print("Created final/charts/{out_filename}")
+13. All files are in `data/` directory
+14. Do NOT use plt.show()
+15. Do NOT use try/except to hide errors
+
+Return ONLY the Python code block."""
+    return [{"role": "user", "content": user}]
+
+
+def render_chart_quality_prompt(
+    chart_spec: Dict[str, Any],
+    code: str,
+    execution_stdout: str,
+    execution_stderr: str,
+) -> List[Dict[str, Any]]:
+    user = f"""You are a data visualization quality reviewer.
+
+# Chart specification
+- Type: {chart_spec.get("chart_type")}
+- Title: {chart_spec.get("title")}
+- Description: {chart_spec.get("description")}
+
+# Generated code
+```python
+{code}
+```
+
+# Execution stdout
+{execution_stdout[:1000]}
+
+# Execution stderr
+{execution_stderr[:500]}
+
+# Your task
+Evaluate the chart quality. Consider:
+1. Does the code correctly load and process the data?
+2. Is the chart type appropriate for the data?
+3. Are labels, title, and legend present?
+4. Will the output be visually clear and professional?
+
+Respond with JSON:
+{{"good": true/false, "issues": "brief description of problems if any", "revised_spec": null}}
+
+Return ONLY the JSON object."""
+    return [{"role": "user", "content": user}]
+
+
+def render_report_section_prompt(
+    query: str,
+    section_name: str,
+    insights: str,
+    chart_filenames: List[str],
+    execution_stdout: str = "",
+) -> List[Dict[str, Any]]:
+    section_instructions = {
+        "executive_summary": "Write a 3-5 sentence executive summary of the entire analysis. Highlight the most important finding.",
+        "key_findings": "List the top 5-8 key findings with supporting data points. Use bullet points.",
+        "statistical_analysis": "Present detailed statistical results: distributions, correlations, aggregations. Use tables where appropriate.",
+        "data_quality": "Report on data quality: completeness, consistency, anomalies found.",
+        "methodology": "Describe the analysis methodology: what approaches were tried, which worked best, and why.",
+        "visualizations": "Reference each chart by filename and explain what it shows. Format: ![Chart Title](charts/filename.png)",
+        "recommendations": "Provide actionable recommendations based on the findings. Number them.",
+        "appendix": "Include technical details: column descriptions, data transformations applied, code snippets.",
+    }
+    instructions = section_instructions.get(section_name, f"Write the {section_name} section.")
+    charts_ref = "\n".join([f"- charts/{c}" for c in chart_filenames]) if chart_filenames else "No charts available"
+
+    user = f"""You are an expert data analyst writing a professional report.
+
+# Question being answered
+{query}
+
+# Section to write
+{section_name}
+
+# Instructions
+{instructions}
+
+# Analysis insights
+{insights[:3000]}
+
+# Analysis output
+{execution_stdout[:2000]}
+
+# Available charts
+{charts_ref}
+
+# Your task
+Write the "{section_name}" section in markdown format. Be data-driven and specific.
+For chart references, use: ![Chart Title](charts/filename.png)
+
+Return ONLY the markdown content for this section (no wrapping code blocks)."""
+    return [{"role": "user", "content": user}]
+
+
 # Appendix G.7 — Debugging agent (traceback summarization)
 def render_debug_summarize_prompt(bug_traceback: str, filename: str) -> List[Dict[str, Any]]:
     """

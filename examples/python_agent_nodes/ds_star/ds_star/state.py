@@ -16,6 +16,35 @@ class Description(BaseModel):
     summary: str  # textual description captured from analyzer script execution output
 
 
+class StrategyBranch(BaseModel):
+    strategy_id: str
+    strategy_description: str
+    plans: List[str] = Field(default_factory=list)
+    base_code: str = ""
+    current_code: str = ""
+    codes_per_step: List[str] = Field(default_factory=list)
+    execution_result: ExecutionResult = Field(default_factory=ExecutionResult)
+    verified: bool = False
+    score: float = 0.0
+    iteration: int = 0
+    ai_call_count: int = 0
+
+
+class VisualizationSpec(BaseModel):
+    chart_type: str
+    title: str
+    description: str
+    data_columns: List[str] = Field(default_factory=list)
+    filename: str
+
+
+class ChartResult(BaseModel):
+    filename: str
+    success: bool
+    code: str = ""
+    error: str = ""
+
+
 class DSStarState(BaseModel):
     # Inputs
     query: str
@@ -58,6 +87,17 @@ class DSStarState(BaseModel):
     run_score: Optional[Dict[str, Any]] = None
     failure_type: Optional[str] = None
     consecutive_verify_fails: int = 0
+
+    # Parallel strategy branches
+    strategy_branches: List[StrategyBranch] = Field(default_factory=list)
+    best_branch_id: Optional[str] = None
+
+    # Visualization
+    visualization_specs: List[VisualizationSpec] = Field(default_factory=list)
+    chart_results: List[ChartResult] = Field(default_factory=list)
+
+    # Rich per-file analysis (multi-perspective)
+    file_analysis_details: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
     # Observability
     history: List[Dict[str, Any]] = Field(default_factory=list)

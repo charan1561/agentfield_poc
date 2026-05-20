@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import UploadFile, File
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from agentfield import AIConfig, Agent
 
 if __package__ in (None, ""):
@@ -64,6 +65,24 @@ async def list_data_files():
         if os.path.isfile(full):
             files.append({"name": name, "size": os.path.getsize(full)})
     return JSONResponse({"files": files})
+
+
+@app.get("/api/charts")
+async def list_charts():
+    workdir = os.getenv("DS_STAR_WORKDIR", "/tmp/ds_star")
+    charts_dir = os.path.join(workdir, "final", "charts")
+    charts = []
+    if os.path.isdir(charts_dir):
+        for name in sorted(os.listdir(charts_dir)):
+            if name.endswith((".png", ".svg", ".jpg")):
+                charts.append({"name": name, "url": f"/charts/{name}"})
+    return JSONResponse({"charts": charts})
+
+
+_workdir = os.getenv("DS_STAR_WORKDIR", "/tmp/ds_star")
+_charts_dir = os.path.join(_workdir, "final", "charts")
+os.makedirs(_charts_dir, exist_ok=True)
+app.mount("/charts", StaticFiles(directory=_charts_dir), name="charts")
 
 
 if __name__ == "__main__":

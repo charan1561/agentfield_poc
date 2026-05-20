@@ -1,21 +1,49 @@
-"""Orchestration router: native AgentField orchestration replacing LangGraph."""
+"""Orchestration router: parallel multi-strategy AgentField orchestration (v3).
+
+Architecture: ~15 DAG nodes, ~400+ internal AI calls per run.
+Each reasoner is 1 DAG node with massive internal parallelism via asyncio.gather.
+Modeled after af-deep-research's pattern.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import os
+import shutil
 import time
 from typing import Any, Dict, List, Optional
 
 from agentfield import AgentRouter
 
+from ds_star.concurrency import run_in_batches, AI_CALL_CONCURRENCY_LIMIT
 from llm_bridge import get_agents, get_workdir, create_llm
 from state_adapter import state_to_response
 
 logger = logging.getLogger(__name__)
 
 orchestration_router = AgentRouter(prefix="orchestration", tags=["pipeline"])
+
+VERIFIER_PERSPECTIVES = ["statistical", "logical", "query_alignment"]
+ANALYSIS_PERSPECTIVES = ["statistical_profile", "relationships_correlations", "data_quality"]
+REPORT_SECTIONS = [
+    "executive_summary", "key_findings", "statistical_analysis",
+    "data_quality", "methodology", "visualizations",
+    "recommendations", "appendix",
+]
+
+
+def app_note(message: str):
+    agent = orchestration_router._agent
+    if agent and hasattr(agent, "note"):
+        agent.note(message)
+    logger.info("[DS-STAR] %s", message)
+
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
 
 
 def _exec_result_to_dict(er) -> dict:
@@ -32,7 +60,6 @@ def _descriptions_to_dicts(descs) -> List[Dict[str, str]]:
 
 
 def _build_full_state(params: dict):
-    """Build a DSStarState from accumulated orchestrator params."""
     from ds_star.state import DSStarState, Description, ExecutionResult
 
     descs = [Description(**d) for d in params.get("descriptions", [])]
@@ -62,8 +89,28 @@ def _build_full_state(params: dict):
     )
 
 
+def _select_best_variant(variants: List[Dict]) -> Dict:
+    successful = [v for v in variants if v.get("exit_code") == 0]
+    if successful:
+        return max(successful, key=lambda v: len(v.get("stdout", "")))
+    return max(variants, key=lambda v: len(v.get("stdout", ""))) if variants else {}
+
+
+def _merge_file_perspectives(results: List[Dict], data_files: List[str]) -> List[Dict[str, str]]:
+    merged: Dict[str, List[str]] = {}
+    for r in results:
+        fn = r.get("filename", "")
+        if fn not in merged:
+            merged[fn] = []
+        merged[fn].append(f"[{r.get('perspective', 'unknown')}]\n{r.get('summary', '')}")
+    return [
+        {"filename": fn, "summary": "\n\n".join(parts)}
+        for fn, parts in merged.items()
+    ]
+
+
 # ---------------------------------------------------------------------------
-# Sub-reasoners: each becomes a separate node in the AgentField DAG
+# Sub-reasoners (kept from v2 — used internally by v3 reasoners)
 # ---------------------------------------------------------------------------
 
 
@@ -101,330 +148,6 @@ async def prepare_context(query: str) -> dict:
 
 
 @orchestration_router.reasoner()
-async def analyze(
-    query: str,
-    data_files: List[str],
-    data_dir: str = "data",
-) -> dict:
-    """Analyze data files and produce descriptions."""
-    from ds_star.state import DSStarState
-
-    workdir = get_workdir()
-    agents = get_agents(workdir)
-    state = DSStarState(query=query, data_files=data_files, data_dir=data_dir)
-
-    state = await asyncio.to_thread(agents.analyze_files, state)
-
-    return {"descriptions": _descriptions_to_dicts(state.data_descriptions)}
-
-
-@orchestration_router.reasoner()
-async def plan_and_code(
-    query: str,
-    descriptions: List[Dict[str, str]],
-    guidelines: str = "",
-    strategies: Optional[List[str]] = None,
-    anti_patterns: Optional[List[Dict]] = None,
-) -> dict:
-    """Create initial plan and implement the first step."""
-    from ds_star.state import DSStarState, Description
-
-    workdir = get_workdir()
-    agents = get_agents(workdir)
-    desc_objs = [Description(**d) for d in descriptions]
-
-    state = DSStarState(
-        query=query,
-        data_files=[d["filename"] for d in descriptions],
-        data_descriptions=desc_objs,
-        guidelines=guidelines,
-        retrieved_strategies=strategies or [],
-        anti_patterns=anti_patterns or [],
-    )
-
-    state = await asyncio.to_thread(agents.initial_plan, state)
-    state = await asyncio.to_thread(agents.implement_initial, state)
-
-    return {
-        "plans": state.plans,
-        "base_code": state.base_code,
-        "current_code": state.current_code,
-        "codes_per_step": state.codes_per_step,
-        "execution_result": _exec_result_to_dict(state.execution_result),
-    }
-
-
-@orchestration_router.reasoner()
-async def verify_result(
-    query: str,
-    plans: List[str],
-    current_code: str,
-    execution_result: Dict[str, Any],
-    iteration: int = 0,
-    max_iterations: int = 20,
-    consecutive_verify_fails: int = 0,
-) -> dict:
-    """Verify whether the analysis answers the query."""
-    from ds_star.state import DSStarState, ExecutionResult
-
-    workdir = get_workdir()
-    agents = get_agents(workdir)
-    er = ExecutionResult(**execution_result)
-
-    state = DSStarState(
-        query=query,
-        data_files=[],
-        plans=plans,
-        current_code=current_code,
-        execution_result=er,
-        iteration=iteration,
-        max_iterations=max_iterations,
-        consecutive_verify_fails=consecutive_verify_fails,
-    )
-
-    state = await asyncio.to_thread(agents.verify, state)
-
-    return {
-        "verified": state.verified,
-        "failure_type": state.failure_type,
-        "consecutive_verify_fails": state.consecutive_verify_fails,
-    }
-
-
-@orchestration_router.reasoner()
-async def route_decision(
-    query: str,
-    descriptions: List[Dict[str, str]],
-    plans: List[str],
-    execution_result: Dict[str, Any],
-    strategies: Optional[List[str]] = None,
-    anti_patterns: Optional[List[Dict]] = None,
-) -> dict:
-    """Decide the next refinement action."""
-    from ds_star.state import DSStarState, Description, ExecutionResult
-
-    workdir = get_workdir()
-    agents = get_agents(workdir)
-    desc_objs = [Description(**d) for d in descriptions]
-    er = ExecutionResult(**execution_result)
-
-    state = DSStarState(
-        query=query,
-        data_files=[d["filename"] for d in descriptions],
-        data_descriptions=desc_objs,
-        plans=plans,
-        execution_result=er,
-        retrieved_strategies=strategies or [],
-        anti_patterns=anti_patterns or [],
-    )
-
-    state = await asyncio.to_thread(agents.route, state)
-
-    return {"decision": state.router_decision}
-
-
-@orchestration_router.reasoner()
-async def refine(
-    query: str,
-    descriptions: List[Dict[str, str]],
-    plans: List[str],
-    codes_per_step: List[str],
-    base_code: str,
-    current_code: str,
-    execution_result: Dict[str, Any],
-    router_decision: str,
-    iteration: int = 0,
-    guidelines: str = "",
-    strategies: Optional[List[str]] = None,
-    data_files: Optional[List[str]] = None,
-    data_dir: str = "data",
-) -> dict:
-    """Execute the refinement action chosen by the router."""
-    from ds_star.state import DSStarState, Description, ExecutionResult
-
-    workdir = get_workdir()
-    agents = get_agents(workdir)
-    desc_objs = [Description(**d) for d in descriptions]
-    er = ExecutionResult(**execution_result)
-
-    state = DSStarState(
-        query=query,
-        data_dir=data_dir,
-        data_files=data_files or [d["filename"] for d in descriptions],
-        data_descriptions=desc_objs,
-        plans=list(plans),
-        base_code=base_code,
-        current_code=current_code,
-        codes_per_step=list(codes_per_step),
-        execution_result=er,
-        iteration=iteration,
-        guidelines=guidelines,
-        retrieved_strategies=strategies or [],
-        router_decision=router_decision,
-    )
-
-    decision = router_decision
-    if isinstance(decision, str) and decision.startswith("step:"):
-        try:
-            step_idx = int(decision.split(":")[1])
-        except Exception:
-            step_idx = len(state.plans)
-        state = await asyncio.to_thread(agents.refine_fix_step, state, step_idx)
-    elif decision == "change_strategy":
-        state.plans = state.plans[:1]
-        state.codes_per_step = state.codes_per_step[:1]
-        state.base_code = state.codes_per_step[0] if state.codes_per_step else ""
-        state.current_code = state.base_code
-        state = await asyncio.to_thread(agents.refine_add_step, state)
-    elif decision == "rerun_analysis":
-        state = await asyncio.to_thread(agents.analyze_files, state)
-        state = await asyncio.to_thread(agents.refine_add_step, state)
-    elif decision == "retrieve_files":
-        state.retrieved_indices = None
-        state = await asyncio.to_thread(agents.refine_add_step, state)
-    else:
-        state = await asyncio.to_thread(agents.refine_add_step, state)
-
-    return {
-        "plans": state.plans,
-        "base_code": state.base_code,
-        "current_code": state.current_code,
-        "codes_per_step": state.codes_per_step,
-        "execution_result": _exec_result_to_dict(state.execution_result),
-        "descriptions": _descriptions_to_dicts(state.data_descriptions),
-    }
-
-
-@orchestration_router.reasoner()
-async def meta_reflect(
-    query: str,
-    iteration: int,
-    max_iterations: int,
-    consecutive_verify_fails: int,
-    strategies: Optional[List[str]] = None,
-) -> dict:
-    """Mid-loop reflection when the agent is stuck."""
-    from ds_star.meta_controller import generate_alternative_strategies
-
-    threshold = max(3, max_iterations // 4)
-    needs_reflection = consecutive_verify_fails >= 2 or iteration >= threshold
-
-    if not needs_reflection:
-        return {"strategies": strategies or [], "reflected": False}
-
-    workdir = get_workdir()
-    llm = create_llm()
-    state = _build_full_state({
-        "query": query,
-        "iteration": iteration,
-        "max_iterations": max_iterations,
-        "strategies": strategies or [],
-    })
-
-    try:
-        alternatives = await asyncio.to_thread(generate_alternative_strategies, state, llm)
-        if alternatives:
-            merged = list(set((strategies or []) + alternatives))
-            return {"strategies": merged, "reflected": True}
-    except Exception as e:
-        logger.warning("meta_reflect failed (non-fatal): %s", e)
-
-    return {"strategies": strategies or [], "reflected": False}
-
-
-@orchestration_router.reasoner()
-async def finalize_result(
-    query: str,
-    descriptions: List[Dict[str, str]],
-    current_code: str,
-    execution_result: Dict[str, Any],
-    guidelines: str = "",
-) -> dict:
-    """Create the final summary from analysis results."""
-    from ds_star.state import DSStarState, Description, ExecutionResult
-
-    workdir = get_workdir()
-    agents = get_agents(workdir)
-    desc_objs = [Description(**d) for d in descriptions]
-    er = ExecutionResult(**execution_result)
-
-    state = DSStarState(
-        query=query,
-        data_files=[d["filename"] for d in descriptions],
-        data_descriptions=desc_objs,
-        current_code=current_code,
-        execution_result=er,
-        guidelines=guidelines,
-    )
-
-    state = await asyncio.to_thread(agents.finalize, state)
-
-    answer = state.final_answer or ""
-
-    # The finalize prompt creates final/result.json with structured data.
-    # If the answer is just a status message, build markdown from result.json.
-    if not answer or len(answer) < 100:
-        import json as _json
-        for candidate in ["final/result.json", "final/summary.md"]:
-            fpath = os.path.join(workdir, candidate)
-            if not os.path.isfile(fpath):
-                continue
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    raw = f.read().strip()
-                if candidate.endswith(".json"):
-                    obj = _json.loads(raw)
-                    answer = _format_result_json_as_markdown(obj, query)
-                elif raw:
-                    answer = raw
-                break
-            except Exception:
-                continue
-
-    return {
-        "final_answer": answer,
-        "final_code": state.final_code,
-    }
-
-
-def _format_result_json_as_markdown(obj: dict, query: str) -> str:
-    """Convert the structured result.json into readable markdown."""
-    parts: List[str] = []
-
-    summary = obj.get("analysis_summary", "")
-    if summary:
-        parts.append(f"## Summary\n\n{summary}")
-
-    data = obj.get("data")
-    if isinstance(data, dict):
-        for key, value in data.items():
-            heading = key.replace("_", " ").title()
-            if isinstance(value, list) and value and isinstance(value[0], dict):
-                cols = list(value[0].keys())
-                header = "| " + " | ".join(c.replace("_", " ").title() for c in cols) + " |"
-                sep = "| " + " | ".join("---" for _ in cols) + " |"
-                rows = []
-                for row in value:
-                    cells = " | ".join(str(row.get(c, "")) for c in cols)
-                    rows.append(f"| {cells} |")
-                parts.append(f"### {heading}\n\n{header}\n{sep}\n" + "\n".join(rows))
-            elif isinstance(value, (int, float, str)):
-                parts.append(f"**{heading}:** {value}")
-            elif isinstance(value, dict):
-                items = "\n".join(f"- **{k.replace('_', ' ').title()}:** {v}" for k, v in value.items())
-                parts.append(f"### {heading}\n\n{items}")
-            else:
-                parts.append(f"**{heading}:** {value}")
-
-    files = obj.get("files_created", [])
-    if files:
-        flist = ", ".join(f"`{f}`" for f in files)
-        parts.append(f"\n*Generated files: {flist}*")
-
-    return "\n\n".join(parts) if parts else str(obj)
-
-
-@orchestration_router.reasoner()
 async def meta_learn(
     query: str,
     data_files: List[str],
@@ -449,17 +172,11 @@ async def meta_learn(
     er = ExecutionResult(**execution_result)
 
     state = DSStarState(
-        query=query,
-        data_files=data_files,
-        plans=plans,
-        current_code=current_code,
-        execution_result=er,
-        iteration=iteration,
-        verified=verified,
-        failure_type=failure_type,
+        query=query, data_files=data_files, plans=plans,
+        current_code=current_code, execution_result=er,
+        iteration=iteration, verified=verified, failure_type=failure_type,
         retrieved_strategies=strategies or [],
-        final_answer=final_answer,
-        final_code=final_code,
+        final_answer=final_answer, final_code=final_code,
     )
 
     score_dict = {"score": 0.5, "quality": "medium", "failure_type": "none"}
@@ -495,14 +212,9 @@ async def meta_learn(
 
         run_id = f"run-{int(time.time() * 1000)}"
         memory.store_run(
-            run_id=run_id,
-            query=query,
-            files_used=data_files,
-            score=final_score,
-            iterations=iteration,
-            failure_type=ft,
-            strategies_used=strategies or [],
-            did_strategy_help=did_help,
+            run_id=run_id, query=query, files_used=data_files,
+            score=final_score, iterations=iteration, failure_type=ft,
+            strategies_used=strategies or [], did_strategy_help=did_help,
             query_embedding=q_emb_run,
         )
     except Exception as e:
@@ -512,6 +224,537 @@ async def meta_learn(
         "run_score": score_dict,
         "failure_type": state.failure_type or "none",
     }
+
+
+# ---------------------------------------------------------------------------
+# v3 parallel reasoners — each is 1 DAG node with internal parallelism
+# ---------------------------------------------------------------------------
+
+
+@orchestration_router.reasoner()
+async def analyze_parallel(
+    query: str,
+    data_files: List[str],
+    data_dir: str = "data",
+) -> dict:
+    """Analyze all files from 3 perspectives in parallel (~45 internal AI calls)."""
+    app_note(f"Analyzing {len(data_files)} files x {len(ANALYSIS_PERSPECTIVES)} perspectives")
+
+    workdir = get_workdir()
+
+    async def _analyze_one(filename: str, perspective: str) -> Dict:
+        agents = get_agents(workdir)
+        return await asyncio.to_thread(
+            agents.analyze_single_file, filename, perspective, query, data_dir,
+        )
+
+    tasks = [
+        _analyze_one(fn, p)
+        for fn in data_files
+        for p in ANALYSIS_PERSPECTIVES
+    ]
+    results = await run_in_batches(tasks)
+
+    descriptions = _merge_file_perspectives(results, data_files)
+    app_note(f"Completed {len(tasks)} analysis calls across {len(data_files)} files")
+    return {"descriptions": descriptions}
+
+
+@orchestration_router.reasoner()
+async def generate_strategies(
+    query: str,
+    descriptions: List[Dict[str, str]],
+    guidelines: str = "",
+    strategies: Optional[List[str]] = None,
+    anti_patterns: Optional[List[Dict]] = None,
+    num_strategies: int = 5,
+) -> dict:
+    """Generate N distinct analysis strategies (1 AI call)."""
+    from ds_star.prompts import render_strategy_generation_prompt
+    from ds_star.strategy_retriever import format_context_block
+    from ds_star.utils import extract_first_code_block
+
+    llm = create_llm()
+    filenames = [d["filename"] for d in descriptions]
+    summaries = [d["summary"] for d in descriptions]
+    past = format_context_block(strategies or [], anti_patterns or [])
+
+    msgs = render_strategy_generation_prompt(
+        query, summaries, filenames, guidelines or "Provide helpful analysis",
+        past_strategies=past, num_strategies=num_strategies,
+    )
+    resp = await asyncio.to_thread(llm.chat_complete, messages=msgs, temperature=0.7)
+
+    # Strip markdown code fences if present
+    clean = extract_first_code_block(resp) if "```" in resp else resp.strip()
+
+    try:
+        parsed = _json.loads(clean)
+        if isinstance(parsed, list):
+            strats = [s for s in parsed if isinstance(s, str)][:num_strategies]
+        else:
+            strats = [resp.strip()]
+    except Exception:
+        strats = [resp.strip()]
+
+    while len(strats) < num_strategies:
+        strats.append(f"Variation {len(strats)+1}: " + (strats[0] if strats else "Standard analysis approach"))
+
+    app_note(f"Generated {len(strats)} analysis strategies")
+    return {"strategies": strats}
+
+
+@orchestration_router.reasoner()
+async def explore_strategy(
+    strategy_id: str,
+    strategy_desc: str,
+    query: str,
+    descriptions: List[Dict[str, str]],
+    guidelines: str = "",
+    strategies: Optional[List[str]] = None,
+    anti_patterns: Optional[List[Dict]] = None,
+    max_iterations: int = 5,
+    num_code_variants: int = 3,
+    num_verifiers: int = 3,
+    data_files: Optional[List[str]] = None,
+    data_dir: str = "data",
+) -> dict:
+    """Explore one analysis strategy branch (~50 internal AI calls).
+
+    Runs plan -> parallel code variants -> ensemble verify -> route -> refine loop.
+    """
+    from ds_star.state import DSStarState, Description
+    from ds_star.strategy_retriever import format_context_block
+
+    app_note(f"Strategy {strategy_id}: {strategy_desc[:80]}...")
+
+    workdir = get_workdir()
+    branch_dir = os.path.join(workdir, "branches", strategy_id)
+    os.makedirs(os.path.join(branch_dir, "data"), exist_ok=True)
+    os.makedirs(os.path.join(branch_dir, "final"), exist_ok=True)
+
+    # Symlink or copy data files into branch workdir
+    src_data = os.path.join(workdir, "data")
+    dst_data = os.path.join(branch_dir, "data")
+    if os.path.isdir(src_data):
+        for fname in os.listdir(src_data):
+            src = os.path.join(src_data, fname)
+            dst = os.path.join(dst_data, fname)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+
+    filenames = [d["filename"] for d in descriptions]
+    summaries = [d["summary"] for d in descriptions]
+    ctx_block = format_context_block(strategies or [], anti_patterns or [])
+    augmented_guidelines = f"{guidelines}\nStrategy: {strategy_desc}"
+
+    ai_call_count = 0
+
+    # Initial plan
+    agents_inst = get_agents(branch_dir)
+    desc_objs = [Description(**d) for d in descriptions]
+    state = DSStarState(
+        query=query, data_files=data_files or filenames,
+        data_descriptions=desc_objs, guidelines=augmented_guidelines,
+        retrieved_strategies=strategies or [], anti_patterns=anti_patterns or [],
+    )
+    state = await asyncio.to_thread(agents_inst.initial_plan, state)
+    ai_call_count += 1
+
+    # Parallel code variants for initial step
+    async def _gen_variant(vid: str, plan: str, base: str = "") -> Dict:
+        a = get_agents(branch_dir)
+        return await asyncio.to_thread(
+            a.generate_code_variant, vid, plan, summaries, filenames, base, ctx_block,
+        )
+
+    raw_variants = await asyncio.gather(*[
+        _gen_variant(f"v{j}", state.plans[0]) for j in range(num_code_variants)
+    ], return_exceptions=True)
+    variants = [v for v in raw_variants if isinstance(v, dict)]
+    ai_call_count += num_code_variants
+    best = _select_best_variant(variants)
+
+    plans = list(state.plans)
+    base_code = best.get("code", "")
+    current_code = base_code
+    codes_per_step = [base_code]
+    exec_result = {
+        "stdout": best.get("stdout", ""),
+        "stderr": best.get("stderr", ""),
+        "exit_code": best.get("exit_code", -1),
+        "artifacts": best.get("artifacts", {}),
+    }
+
+    iteration = 0
+    verified = False
+
+    while iteration < max_iterations:
+        app_note(f"  {strategy_id} iter {iteration}: ensemble verify ({num_verifiers} perspectives)")
+
+        # Ensemble verification
+        async def _verify(perspective: str) -> Dict:
+            a = get_agents(branch_dir)
+            result_text = exec_result.get("stdout", "")
+            return await asyncio.to_thread(
+                a.verify_from_perspective, perspective, query, current_code, result_text, plans,
+            )
+
+        raw_verdicts = await asyncio.gather(*[_verify(p) for p in VERIFIER_PERSPECTIVES[:num_verifiers]], return_exceptions=True)
+        verdicts = [v for v in raw_verdicts if isinstance(v, dict)]
+        ai_call_count += num_verifiers
+        verified = len(verdicts) > 0 and sum(1 for v in verdicts if v.get("verified")) >= 2
+        if verified:
+            app_note(f"  {strategy_id}: verified at iteration {iteration}")
+            break
+
+        # Route decision
+        from ds_star.state import ExecutionResult
+        agents_route = get_agents(branch_dir)
+        route_state = DSStarState(
+            query=query, data_files=data_files or filenames,
+            data_descriptions=desc_objs, plans=plans,
+            execution_result=ExecutionResult(**exec_result),
+            retrieved_strategies=strategies or [], anti_patterns=anti_patterns or [],
+        )
+        route_state = await asyncio.to_thread(agents_route.route, route_state)
+        ai_call_count += 1
+        decision = route_state.router_decision or "add"
+
+        # Next plan
+        last_result = exec_result.get("stdout", "")
+        from ds_star.utils import truncate_text
+        plan_agents = get_agents(branch_dir)
+        plan_state = DSStarState(
+            query=query, data_files=data_files or filenames,
+            data_descriptions=desc_objs, plans=plans,
+            guidelines=augmented_guidelines, retrieved_strategies=strategies or [],
+        )
+        plan_state = await asyncio.to_thread(plan_agents.next_plan, plan_state, truncate_text(last_result, 2000))
+        ai_call_count += 1
+        plans = list(plan_state.plans)
+
+        # Parallel code variants for this step
+        current_step = plans[-1] if plans else ""
+        raw_variants = await asyncio.gather(*[
+            _gen_variant(f"v{j}", current_step, current_code) for j in range(num_code_variants)
+        ], return_exceptions=True)
+        variants = [v for v in raw_variants if isinstance(v, dict)]
+        ai_call_count += num_code_variants
+
+        # If all fail, parallel debug
+        successful = [v for v in variants if v.get("exit_code") == 0]
+        if not successful and variants:
+            async def _debug(attempt_id: str, failed: Dict) -> Dict:
+                a = get_agents(branch_dir)
+                from ds_star.prompts import render_debug_fix_solution_prompt, render_debug_summarize_prompt
+                from ds_star.utils import extract_first_code_block
+                tb = truncate_text(failed.get("stderr", ""), 4000)
+                sum_msgs = render_debug_summarize_prompt(tb, "solution")
+                summary = await asyncio.to_thread(a._chat, sum_msgs)
+                fix_msgs = render_debug_fix_solution_prompt(summaries, filenames, failed.get("code", ""), truncate_text(summary, 3500))
+                fixed_resp = await asyncio.to_thread(a._chat, fix_msgs)
+                fixed_code = extract_first_code_block(fixed_resp)
+                from ds_star.executor import run_python_code
+                result = run_python_code(fixed_code, workdir=branch_dir)
+                return {
+                    "variant_id": attempt_id, "code": fixed_code,
+                    "stdout": result.stdout, "stderr": result.stderr,
+                    "exit_code": result.exit_code, "artifacts": result.artifacts,
+                }
+
+            raw_debugged = await asyncio.gather(*[
+                _debug(f"d{j}", variants[0]) for j in range(3)
+            ], return_exceptions=True)
+            debugged = [d for d in raw_debugged if isinstance(d, dict)]
+            ai_call_count += 3
+            successful = [d for d in debugged if d.get("exit_code") == 0]
+
+        best = _select_best_variant(successful or variants)
+        current_code = best.get("code", current_code)
+        base_code = current_code
+        codes_per_step.append(current_code)
+        exec_result = {
+            "stdout": best.get("stdout", ""),
+            "stderr": best.get("stderr", ""),
+            "exit_code": best.get("exit_code", -1),
+            "artifacts": best.get("artifacts", {}),
+        }
+        iteration += 1
+
+    return {
+        "strategy_id": strategy_id,
+        "strategy_description": strategy_desc,
+        "plans": plans,
+        "base_code": base_code,
+        "current_code": current_code,
+        "codes_per_step": codes_per_step,
+        "execution_result": exec_result,
+        "verified": verified,
+        "iteration": iteration,
+        "ai_call_count": ai_call_count,
+    }
+
+
+@orchestration_router.reasoner()
+async def select_best_strategy(
+    query: str,
+    branches: List[Dict[str, Any]],
+    descriptions: List[Dict[str, str]],
+) -> dict:
+    """Evaluate all strategy branches and pick the winner (~6 internal AI calls)."""
+    app_note(f"Selecting best from {len(branches)} strategies")
+
+    if not branches:
+        app_note("No strategy branches to evaluate")
+        return {"strategy_id": "none", "plans": [], "current_code": "", "execution_result": {}, "verified": False}
+
+    workdir = get_workdir()
+
+    # Parallel verification of each branch's final result
+    async def _verify_branch(branch: Dict) -> Dict:
+        agents_inst = get_agents(workdir)
+        result_text = branch.get("execution_result", {}).get("stdout", "")
+        code = branch.get("current_code", "")
+        plans = branch.get("plans", [])
+        verdict = await asyncio.to_thread(
+            agents_inst.verify_from_perspective, "query_alignment", query, code, result_text, plans,
+        )
+        return {
+            "strategy_id": branch.get("strategy_id"),
+            "verified": verdict.get("verified", False),
+            "confidence": verdict.get("confidence", 0.0),
+            "output_length": len(result_text),
+        }
+
+    raw_scores = await asyncio.gather(*[_verify_branch(b) for b in branches], return_exceptions=True)
+    scores = []
+    for i, s in enumerate(raw_scores):
+        if isinstance(s, dict):
+            scores.append((i, s))
+        else:
+            scores.append((i, {"verified": False, "confidence": 0.0, "output_length": 0}))
+
+    # Pick best: prefer verified, then highest confidence, then longest output
+    best_idx = 0
+    best_score = (-1, -1.0, -1)
+    for i, s in scores:
+        score_tuple = (
+            int(s.get("verified", False)),
+            s.get("confidence", 0.0),
+            s.get("output_length", 0),
+        )
+        if score_tuple > best_score:
+            best_score = score_tuple
+            best_idx = i
+
+    winner = branches[best_idx]
+    winner_score = dict(scores)[best_idx]
+    app_note(f"Selected strategy: {winner.get('strategy_id', 'unknown')} (verified={winner_score.get('verified')})")
+    return winner
+
+
+@orchestration_router.reasoner()
+async def cross_strategy_synthesis(
+    branches: List[Dict[str, Any]],
+    query: str,
+) -> dict:
+    """Extract insights from ALL branches and merge (~6 internal AI calls)."""
+    app_note(f"Extracting insights from {len(branches)} strategy branches")
+
+    llm = create_llm()
+
+    async def _extract_insights(branch: Dict) -> str:
+        stdout = branch.get("execution_result", {}).get("stdout", "")
+        plans = branch.get("plans", [])
+        sid = branch.get("strategy_id", "")
+        prompt = (
+            f"Extract the 3-5 most important data insights from this analysis branch.\n\n"
+            f"Strategy: {branch.get('strategy_description', '')}\n"
+            f"Plans: {'; '.join(plans)}\n"
+            f"Output:\n{stdout[:2000]}\n\n"
+            f"Return a brief bullet list of unique insights."
+        )
+        return await asyncio.to_thread(
+            llm.chat_complete, messages=[{"role": "user", "content": prompt}], temperature=0.3,
+        )
+
+    raw_insights = await asyncio.gather(*[_extract_insights(b) for b in branches], return_exceptions=True)
+    insights = [ins if isinstance(ins, str) else "(extraction failed)" for ins in raw_insights]
+
+    # Merge
+    all_insights = "\n\n".join([
+        f"### {b.get('strategy_id', f'Branch {i}')}\n{ins}"
+        for i, (b, ins) in enumerate(zip(branches, insights))
+    ])
+    merge_prompt = (
+        f"Merge these insights from {len(branches)} analysis strategies into a unified set of key findings.\n"
+        f"Remove duplicates. Prioritize findings that appear across multiple strategies.\n\n"
+        f"Question: {query}\n\n{all_insights}\n\n"
+        f"Return a consolidated bullet list of unique insights."
+    )
+    merged = await asyncio.to_thread(
+        llm.chat_complete, messages=[{"role": "user", "content": merge_prompt}], temperature=0.3,
+    )
+
+    return {"merged_insights": merged, "per_branch_insights": list(insights)}
+
+
+@orchestration_router.reasoner()
+async def generate_visualizations(
+    query: str,
+    descriptions: List[Dict[str, str]],
+    execution_result: Dict[str, Any],
+    data_files: Optional[List[str]] = None,
+    data_dir: str = "data",
+) -> dict:
+    """Plan and generate charts in parallel (~24 internal AI calls)."""
+    from ds_star.prompts import render_visualization_planner_prompt, render_chart_quality_prompt
+
+    app_note("Planning visualizations")
+
+    workdir = get_workdir()
+    llm = create_llm()
+    filenames = [d["filename"] for d in descriptions]
+    summaries = [d["summary"] for d in descriptions]
+    stdout = execution_result.get("stdout", "")
+
+    # Plan charts (1 AI call)
+    msgs = render_visualization_planner_prompt(query, summaries, filenames, stdout)
+    resp = await asyncio.to_thread(llm.chat_complete, messages=msgs, temperature=0.5)
+
+    try:
+        specs = _json.loads(resp.strip())
+        if not isinstance(specs, list):
+            specs = []
+    except Exception:
+        specs = []
+
+    if not specs:
+        app_note("No visualization specs generated, skipping charts")
+        return {"charts": [], "specs": []}
+
+    os.makedirs(os.path.join(workdir, "final", "charts"), exist_ok=True)
+    app_note(f"Generating {len(specs)} charts in parallel")
+
+    # Generate charts in parallel — embed spec in result to avoid alignment issues
+    async def _gen_chart(spec: Dict) -> Dict:
+        agents_inst = get_agents(workdir)
+        result = await asyncio.to_thread(agents_inst.generate_chart_code, spec, summaries, filenames)
+        result["_spec"] = spec
+        return result
+
+    chart_tasks = [_gen_chart(s) for s in specs]
+    charts = await run_in_batches(chart_tasks)
+
+    # Quality check in parallel — use embedded spec, not positional zip
+    async def _check_quality(chart: Dict) -> Dict:
+        spec = chart.get("_spec", {})
+        if not chart.get("success"):
+            return {"good": False, "chart": chart, "spec": spec}
+        msgs = render_chart_quality_prompt(spec, chart.get("code", ""), "", chart.get("error", ""))
+        resp = await asyncio.to_thread(llm.chat_complete, messages=msgs, temperature=0.3)
+        try:
+            parsed = _json.loads(resp.strip())
+        except Exception:
+            parsed = {"good": True}
+        return {"good": parsed.get("good", True), "chart": chart, "spec": spec}
+
+    check_tasks = [_check_quality(c) for c in charts if c.get("success")]
+    checked = await run_in_batches(check_tasks)
+
+    # Redo poor quality charts
+    poor = [c for c in checked if not c.get("good")]
+    if poor:
+        app_note(f"Regenerating {len(poor)} poor quality charts")
+        redo_tasks = [_gen_chart(c["spec"]) for c in poor]
+        redone = await run_in_batches(redo_tasks)
+        for redo in redone:
+            if redo.get("success"):
+                # Replace in charts list
+                for i, c in enumerate(charts):
+                    if c.get("filename") == redo.get("filename"):
+                        charts[i] = redo
+                        break
+
+    successful = [c for c in charts if c.get("success")]
+    app_note(f"Generated {len(successful)}/{len(specs)} charts successfully")
+    return {"charts": charts, "specs": specs}
+
+
+@orchestration_router.reasoner()
+async def generate_report(
+    query: str,
+    best: Dict[str, Any],
+    charts: List[Dict[str, Any]],
+    merged_insights: str,
+    descriptions: List[Dict[str, str]],
+    guidelines: str = "",
+) -> dict:
+    """Generate final report with parallel section writing (~17 internal AI calls)."""
+    from ds_star.prompts import render_report_section_prompt
+
+    app_note("Generating report with parallel section writing")
+
+    llm = create_llm()
+    workdir = get_workdir()
+    stdout = best.get("execution_result", {}).get("stdout", "")
+    chart_filenames = [c.get("filename", "") for c in charts if c.get("success")]
+
+    # Write sections in parallel
+    async def _write_section(section_name: str) -> Dict:
+        msgs = render_report_section_prompt(
+            query, section_name, merged_insights, chart_filenames, stdout,
+        )
+        content = await asyncio.to_thread(
+            llm.chat_complete, messages=msgs, temperature=0.4,
+        )
+        return {"section": section_name, "content": content}
+
+    raw_drafts = await asyncio.gather(*[_write_section(s) for s in REPORT_SECTIONS], return_exceptions=True)
+    drafts = [d for d in raw_drafts if isinstance(d, dict)]
+    if not drafts:
+        return {"final_answer": f"# Analysis Report\n\n**Query:** {query}\n\nReport generation failed."}
+
+    # Edit pass in parallel
+    all_draft_text = "\n\n".join([d["content"] for d in drafts])
+
+    async def _edit_section(draft: Dict) -> Dict:
+        prompt = (
+            f"Refine this report section. Fix inconsistencies, improve flow, add cross-references.\n\n"
+            f"Section: {draft['section']}\n\n"
+            f"Draft:\n{draft['content']}\n\n"
+            f"Full report context (other sections):\n{all_draft_text[:3000]}\n\n"
+            f"Return the refined section content only."
+        )
+        refined = await asyncio.to_thread(
+            llm.chat_complete, messages=[{"role": "user", "content": prompt}], temperature=0.3,
+        )
+        return {"section": draft["section"], "content": refined}
+
+    raw_polished = await asyncio.gather(*[_edit_section(d) for d in drafts], return_exceptions=True)
+    polished = [p if isinstance(p, dict) else d for p, d in zip(raw_polished, drafts)]
+
+    # Assemble final report
+    report_parts = []
+    report_parts.append(f"# Analysis Report\n\n**Query:** {query}\n")
+    for section in polished:
+        name = section["section"].replace("_", " ").title()
+        report_parts.append(f"## {name}\n\n{section['content']}")
+
+    if chart_filenames:
+        report_parts.append("\n---\n*Charts are available in the `charts/` directory.*")
+
+    final_answer = "\n\n".join(report_parts)
+
+    # Save report to file
+    report_path = os.path.join(workdir, "final", "report.md")
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    with open(report_path, "w", encoding="utf-8", errors="replace") as f:
+        f.write(final_answer)
+
+    app_note("Report generated successfully")
+    return {"final_answer": final_answer}
 
 
 # ---------------------------------------------------------------------------
@@ -526,146 +769,119 @@ async def run_pipeline(
     max_iterations: int = 20,
     guidelines: Optional[str] = None,
     data_dir: str = "data",
+    num_strategies: int = 5,
+    strategy_max_iters: int = 5,
+    num_code_variants: int = 3,
+    num_verifiers: int = 3,
 ) -> dict:
-    """Run the full DS_star analysis pipeline.
+    """Run the parallel DS-star v3 pipeline.
 
-    Each await call below creates a child node in the AgentField DAG,
-    giving full visibility into every step of the pipeline.
+    ~15 DAG nodes, ~400+ internal AI calls.
+    Each await below creates a child DAG node.
+    Internal parallelism happens via asyncio.gather inside each reasoner.
     """
-    logger.info("Starting DS_star pipeline: query=%r, files=%s, max_iter=%d",
-                query, data_files, max_iterations)
+    t0 = time.time()
+    app_note(f"Starting pipeline: {len(data_files)} files, {num_strategies} strategies, {num_code_variants} variants")
 
-    # Step 1: Prepare context (retrieve strategies from memory)
-    ctx = await prepare_context(query=query)
+    # Step 1: 2 DAG nodes (parallel) — context + multi-perspective file analysis
+    ctx_task = prepare_context(query=query)
+    analysis_task = analyze_parallel(query=query, data_files=data_files, data_dir=data_dir)
+    ctx, analysis = await asyncio.gather(ctx_task, analysis_task)
+
     strategies = ctx["strategies"]
     anti_patterns = ctx["anti_patterns"]
-
-    # Step 2: Analyze data files
-    analysis = await analyze(query=query, data_files=data_files, data_dir=data_dir)
     descriptions = analysis["descriptions"]
 
-    # Step 3: Initial plan + code implementation
-    impl = await plan_and_code(
-        query=query,
-        descriptions=descriptions,
-        guidelines=guidelines or "",
-        strategies=strategies,
-        anti_patterns=anti_patterns,
+    # Step 2: 1 DAG node — generate strategies
+    strat_result = await generate_strategies(
+        query=query, descriptions=descriptions,
+        guidelines=guidelines or "", strategies=strategies,
+        anti_patterns=anti_patterns, num_strategies=num_strategies,
+    )
+    strategy_list = strat_result["strategies"]
+
+    # Step 3: N DAG nodes (parallel) — explore each strategy
+    app_note(f"Exploring {len(strategy_list)} strategies in parallel")
+    branch_tasks = [
+        explore_strategy(
+            strategy_id=f"s{i}", strategy_desc=s, query=query,
+            descriptions=descriptions, guidelines=guidelines or "",
+            strategies=strategies, anti_patterns=anti_patterns,
+            max_iterations=strategy_max_iters,
+            num_code_variants=num_code_variants,
+            num_verifiers=num_verifiers,
+            data_files=data_files, data_dir=data_dir,
+        )
+        for i, s in enumerate(strategy_list)
+    ]
+    branches = await run_in_batches(branch_tasks, batch_size=num_strategies)
+
+    # Step 4: 1 DAG node — select best strategy
+    best = await select_best_strategy(
+        query=query, branches=branches, descriptions=descriptions,
     )
 
-    plans = impl["plans"]
-    base_code = impl["base_code"]
-    current_code = impl["current_code"]
-    codes_per_step = impl["codes_per_step"]
-    exec_result = impl["execution_result"]
+    # Step 5: 1 DAG node — cross-strategy synthesis
+    synthesis = await cross_strategy_synthesis(branches=branches, query=query)
+    merged_insights = synthesis["merged_insights"]
 
-    # Step 4: Verify/refine loop
-    iteration = 0
-    verified = False
-    failure_type = None
-    consecutive_fails = 0
+    # Step 6: 1 DAG node — generate visualizations
+    viz = await generate_visualizations(
+        query=query, descriptions=descriptions,
+        execution_result=best.get("execution_result", {}),
+        data_files=data_files, data_dir=data_dir,
+    )
+    charts = viz.get("charts", [])
 
-    while iteration < max_iterations:
-        # Verify
-        v = await verify_result(
-            query=query,
-            plans=plans,
-            current_code=current_code,
-            execution_result=exec_result,
-            iteration=iteration,
-            max_iterations=max_iterations,
-            consecutive_verify_fails=consecutive_fails,
-        )
-        verified = v["verified"]
-        failure_type = v["failure_type"]
-        consecutive_fails = v["consecutive_verify_fails"]
+    # Copy winning branch outputs to main final/
+    workdir = get_workdir()
+    winning_branch = os.path.join(workdir, "branches", best.get("strategy_id", "s0"), "final")
+    main_final = os.path.join(workdir, "final")
+    if os.path.isdir(winning_branch):
+        for item in os.listdir(winning_branch):
+            src = os.path.join(winning_branch, item)
+            dst = os.path.join(main_final, item)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
 
-        if verified or iteration >= max_iterations:
-            break
-
-        # Route
-        r = await route_decision(
-            query=query,
-            descriptions=descriptions,
-            plans=plans,
-            execution_result=exec_result,
-            strategies=strategies,
-            anti_patterns=anti_patterns,
-        )
-
-        # Meta-reflect if stuck
-        if consecutive_fails >= 2 or iteration >= max(3, max_iterations // 4):
-            mr = await meta_reflect(
-                query=query,
-                iteration=iteration,
-                max_iterations=max_iterations,
-                consecutive_verify_fails=consecutive_fails,
-                strategies=strategies,
-            )
-            strategies = mr["strategies"]
-            if mr["reflected"]:
-                consecutive_fails = 0
-
-        # Refine
-        ref = await refine(
-            query=query,
-            descriptions=descriptions,
-            plans=plans,
-            codes_per_step=codes_per_step,
-            base_code=base_code,
-            current_code=current_code,
-            execution_result=exec_result,
-            router_decision=r["decision"],
-            iteration=iteration,
-            guidelines=guidelines or "",
-            strategies=strategies,
-            data_files=data_files,
-            data_dir=data_dir,
-        )
-
-        plans = ref["plans"]
-        base_code = ref["base_code"]
-        current_code = ref["current_code"]
-        codes_per_step = ref["codes_per_step"]
-        exec_result = ref["execution_result"]
-        descriptions = ref["descriptions"]
-        iteration += 1
-
-    # Step 5: Finalize
-    final = await finalize_result(
-        query=query,
-        descriptions=descriptions,
-        current_code=current_code,
-        execution_result=exec_result,
+    # Step 7: 1 DAG node — generate report
+    report = await generate_report(
+        query=query, best=best, charts=charts,
+        merged_insights=merged_insights, descriptions=descriptions,
         guidelines=guidelines or "",
     )
 
-    # Step 6: Meta-learn
+    # Step 8: 1 DAG node — meta-learn
     ml = await meta_learn(
-        query=query,
-        data_files=data_files,
-        plans=plans,
-        current_code=current_code,
-        execution_result=exec_result,
-        iteration=iteration,
-        verified=verified,
-        failure_type=failure_type,
+        query=query, data_files=data_files,
+        plans=best.get("plans", []),
+        current_code=best.get("current_code", ""),
+        execution_result=best.get("execution_result", {}),
+        iteration=sum(b.get("iteration", 0) for b in branches),
+        verified=best.get("verified", False),
+        failure_type=None,
         strategies=strategies,
-        final_answer=final["final_answer"],
-        final_code=final["final_code"],
+        final_answer=report["final_answer"],
+        final_code=best.get("current_code"),
     )
 
-    logger.info("Pipeline completed: iterations=%d, verified=%s", iteration, verified)
+    elapsed = time.time() - t0
+    total_ai_calls = sum(b.get("ai_call_count", 0) for b in branches)
+    app_note(f"Pipeline completed in {elapsed:.0f}s: {len(branches)} strategies, ~{total_ai_calls}+ AI calls")
 
     score_obj = ml["run_score"]
     run_score = score_obj.get("score", 0.5) if isinstance(score_obj, dict) else score_obj
 
     return {
-        "final_answer": final["final_answer"],
-        "final_code": final["final_code"],
-        "iterations": iteration,
-        "verified": verified,
-        "plans": plans,
+        "final_answer": report["final_answer"],
+        "final_code": best.get("current_code", ""),
+        "charts": [c.get("filename", "") for c in charts if c.get("success")],
+        "strategies_explored": len(branches),
+        "total_ai_calls": total_ai_calls,
+        "iterations": sum(b.get("iteration", 0) for b in branches),
+        "verified": best.get("verified", False),
+        "plans": best.get("plans", []),
         "run_score": run_score,
         "failure_type": ml["failure_type"],
+        "elapsed_seconds": round(elapsed, 1),
     }
