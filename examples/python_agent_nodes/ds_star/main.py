@@ -40,7 +40,7 @@ app.include_router(orchestration_router)
 app.include_router(meta_router)
 
 
-@app.server.post("/upload")
+@app.post("/upload")
 async def upload_data_file(file: UploadFile = File(...)):
     workdir = os.getenv("DS_STAR_WORKDIR", "/tmp/ds_star")
     data_dir = os.path.join(workdir, "data")
@@ -52,7 +52,7 @@ async def upload_data_file(file: UploadFile = File(...)):
     return JSONResponse({"filename": file.filename, "size": len(content)})
 
 
-@app.server.get("/files")
+@app.get("/files")
 async def list_data_files():
     workdir = os.getenv("DS_STAR_WORKDIR", "/tmp/ds_star")
     data_dir = os.path.join(workdir, "data")
