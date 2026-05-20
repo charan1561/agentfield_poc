@@ -1,5 +1,6 @@
 agentfield
 openai
+python-multipart
 pydantic>=2.0
 python-dotenv
 pandas

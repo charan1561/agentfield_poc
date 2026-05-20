@@ -190,9 +190,9 @@ function ResultsPanel({ result }: { result: ExecutionStatusResponse | null }) {
           <CardContent className="p-4 text-center">
             <div className={cn(
               "text-2xl font-bold",
-              (data.run_score ?? 0) >= 0.7 ? "text-green-500" : (data.run_score ?? 0) >= 0.4 ? "text-amber-500" : "text-destructive"
+              Number(data.run_score ?? 0) >= 0.7 ? "text-green-500" : Number(data.run_score ?? 0) >= 0.4 ? "text-amber-500" : "text-destructive"
             )}>
-              {data.run_score != null ? data.run_score.toFixed(2) : "-"}
+              {data.run_score != null ? Number(data.run_score).toFixed(2) : "-"}
             </div>
             <div className="text-xs text-muted-foreground mt-1">Score</div>
           </CardContent>
