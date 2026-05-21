@@ -250,20 +250,30 @@ function StrategySummary({ data }: { data: Record<string, any> }) {
 
 async function buildReportHTML(
   data: Record<string, any>,
-  charts: ChartInfo[],
 ): Promise<string> {
-  // Fetch chart images and convert to base64
+  let markdown = data.final_answer || "";
+
+  // Extract chart filenames directly from markdown ![alt](charts/filename.png)
+  const chartRefPattern = /!\[[^\]]*\]\(charts\/([^)]+)\)/g;
+  const chartFilenames = new Set<string>();
+  let m;
+  while ((m = chartRefPattern.exec(markdown)) !== null) {
+    chartFilenames.add(m[1]);
+  }
+
+  // Fetch each chart image from agent proxy and convert to base64
   const chartEmbeds: Map<string, string> = new Map();
-  await Promise.all(charts.map(async (chart) => {
+  await Promise.all([...chartFilenames].map(async (filename) => {
     try {
-      const resp = await fetch(dsStarApi.getChartUrl(chart.name));
+      const resp = await fetch(dsStarApi.getChartUrl(filename));
+      if (!resp.ok) return;
       const blob = await resp.blob();
       const dataUrl = await new Promise<string>((resolve) => {
         const reader = new FileReader();
         reader.onloadend = () => resolve(reader.result as string);
         reader.readAsDataURL(blob);
       });
-      chartEmbeds.set(chart.name, dataUrl);
+      chartEmbeds.set(filename, dataUrl);
     } catch { /* skip */ }
   }));
 
@@ -271,19 +281,15 @@ async function buildReportHTML(
     ? (typeof data.run_score === "object" ? (data.run_score as any).score : data.run_score)
     : null;
 
-  // Replace markdown chart image refs with inline <img> tags containing base64
-  let markdown = data.final_answer || "";
+  // Replace markdown image refs with inline base64 <img> tags
   const referencedCharts = new Set<string>();
-  for (const [name, dataUrl] of chartEmbeds) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(charts/${escaped}\\)`, "g");
-    if (pattern.test(markdown)) {
-      referencedCharts.add(name);
-      markdown = markdown.replace(
-        new RegExp(`!\\[([^\\]]*)\\]\\(charts/${escaped}\\)`, "g"),
-        `<img src="${dataUrl}" alt="$1" style="max-width:100%;border-radius:8px;margin:12px 0;display:block;" />`
-      );
-    }
+  for (const [filename, dataUrl] of chartEmbeds) {
+    const escaped = filename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    referencedCharts.add(filename);
+    markdown = markdown.replace(
+      new RegExp(`!\\[([^\\]]*)\\]\\(charts/${escaped}\\)`, "g"),
+      `<img src="${dataUrl}" alt="$1" style="max-width:100%;border-radius:8px;margin:12px 0;display:block;" />`
+    );
   }
 
   // Convert markdown to HTML using marked (proper GFM tables, code blocks, lists)
@@ -379,6 +385,13 @@ async function buildReportHTML(
     body { padding: 20px; }
     .stats { break-inside: avoid; }
     pre { white-space: pre-wrap; word-wrap: break-word; }
+    img { break-inside: avoid; max-width: 100%; }
+    table { break-inside: avoid; }
+    h2, h3 { break-after: avoid; }
+    .chart-grid { break-inside: avoid; }
+    .chart-card { break-inside: avoid; }
+    .code-section { break-inside: avoid; }
+    .plan-list li { break-inside: avoid; }
   }
 </style>
 </head>
@@ -477,14 +490,14 @@ function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | nu
                 onClick={async () => {
                   setDownloading(true);
                   try {
-                    const html = await buildReportHTML(data, charts);
-                    const blob = new Blob([html], { type: "text/html" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `ds-star-report-${new Date().toISOString().slice(0, 10)}.html`;
-                    a.click();
-                    URL.revokeObjectURL(url);
+                    const html = await buildReportHTML(data);
+                    const printWin = window.open("", "_blank");
+                    if (printWin) {
+                      printWin.document.write(html);
+                      printWin.document.close();
+                      printWin.addEventListener("load", () => printWin.print());
+                      setTimeout(() => printWin.print(), 600);
+                    }
                   } finally {
                     setDownloading(false);
                   }
@@ -492,7 +505,7 @@ function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | nu
                 className="h-7 text-xs gap-1.5"
               >
                 {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                Download Report
+                Save as PDF
               </Button>
             </div>
           </CardHeader>
