@@ -38,6 +38,7 @@ import type { WorkflowDAGLightweightResponse } from "@/types/workflows";
 import { cn } from "@/lib/utils";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { marked } from "marked";
 
 type PipelinePhase = "idle" | "uploading" | "running" | "completed" | "error";
 
@@ -211,47 +212,33 @@ function ChartsGrid({ charts }: { charts: ChartInfo[] }) {
 
 function StrategySummary({ data }: { data: Record<string, any> }) {
   const strategies = data.strategies_explored;
-  const aiCalls = data.total_ai_calls;
   const elapsed = data.elapsed_seconds;
 
-  if (!strategies && !aiCalls) return null;
+  if (!strategies && elapsed == null) return null;
 
   return (
-    <div className="grid grid-cols-3 gap-3">
+    <div className="grid grid-cols-2 gap-3">
       {strategies != null && (
         <Card variant="muted" interactive={false}>
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold text-primary">
+          <CardContent className="p-3 text-center">
+            <div className="text-xl font-bold text-primary">
               {strategies}
             </div>
-            <div className="text-xs text-muted-foreground mt-1 flex items-center justify-center gap-1">
-              <Layers className="h-3 w-3" />
+            <div className="text-[10px] text-muted-foreground mt-1 flex items-center justify-center gap-1">
+              <Layers className="h-2.5 w-2.5" />
               Strategies
-            </div>
-          </CardContent>
-        </Card>
-      )}
-      {aiCalls != null && (
-        <Card variant="muted" interactive={false}>
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold text-primary">
-              {aiCalls}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1 flex items-center justify-center gap-1">
-              <Zap className="h-3 w-3" />
-              AI Calls
             </div>
           </CardContent>
         </Card>
       )}
       {elapsed != null && (
         <Card variant="muted" interactive={false}>
-          <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold">
+          <CardContent className="p-3 text-center">
+            <div className="text-xl font-bold">
               {elapsed < 60 ? `${Math.round(elapsed)}s` : `${Math.floor(elapsed / 60)}m ${Math.round(elapsed % 60)}s`}
             </div>
-            <div className="text-xs text-muted-foreground mt-1 flex items-center justify-center gap-1">
-              <Timer className="h-3 w-3" />
+            <div className="text-[10px] text-muted-foreground mt-1 flex items-center justify-center gap-1">
+              <Timer className="h-2.5 w-2.5" />
               Elapsed
             </div>
           </CardContent>
@@ -266,8 +253,8 @@ async function buildReportHTML(
   charts: ChartInfo[],
 ): Promise<string> {
   // Fetch chart images and convert to base64
-  const chartEmbeds: { name: string; dataUrl: string }[] = [];
-  for (const chart of charts) {
+  const chartEmbeds: Map<string, string> = new Map();
+  await Promise.all(charts.map(async (chart) => {
     try {
       const resp = await fetch(dsStarApi.getChartUrl(chart.name));
       const blob = await resp.blob();
@@ -276,43 +263,51 @@ async function buildReportHTML(
         reader.onloadend = () => resolve(reader.result as string);
         reader.readAsDataURL(blob);
       });
-      chartEmbeds.push({ name: chart.name, dataUrl });
-    } catch {
-      // skip failed chart fetches
-    }
-  }
+      chartEmbeds.set(chart.name, dataUrl);
+    } catch { /* skip */ }
+  }));
 
-  const markdown = data.final_answer || "";
   const score = data.run_score != null
     ? (typeof data.run_score === "object" ? (data.run_score as any).score : data.run_score)
     : null;
 
-  // Replace markdown image references with embedded base64
-  let processedMarkdown = markdown;
-  for (const { name, dataUrl } of chartEmbeds) {
-    processedMarkdown = processedMarkdown.replace(
-      new RegExp(`!\\[([^\\]]*)\\]\\(charts/${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "g"),
-      `<img src="${dataUrl}" alt="$1" style="max-width:100%;border-radius:8px;margin:16px 0;" />`
+  // Replace markdown chart image refs with base64 before converting
+  let markdown = data.final_answer || "";
+  for (const [name, dataUrl] of chartEmbeds) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    markdown = markdown.replace(
+      new RegExp(`!\\[([^\\]]*)\\]\\(charts/${escaped}\\)`, "g"),
+      `![{$1}](${dataUrl})`
     );
   }
 
-  const chartsHTML = chartEmbeds.length > 0
-    ? `<h2>Visualizations</h2>
-       <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin:24px 0;">
-         ${chartEmbeds.map(c => `<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
-           <img src="${c.dataUrl}" alt="${c.name}" style="width:100%;display:block;" />
-           <div style="padding:6px 10px;font-size:12px;color:#6b7280;background:#f9fafb;">${c.name}</div>
+  // Convert markdown to HTML using marked (proper GFM tables, code blocks, lists)
+  const bodyHTML = await marked.parse(markdown, { gfm: true, breaks: false });
+
+  // Charts gallery (any chart not already referenced in the report)
+  const referencedCharts = new Set<string>();
+  for (const [name] of chartEmbeds) {
+    if (markdown.includes(chartEmbeds.get(name)!)) referencedCharts.add(name);
+  }
+  const unreferencedCharts = [...chartEmbeds.entries()].filter(([n]) => !referencedCharts.has(n));
+  const galleryHTML = unreferencedCharts.length > 0
+    ? `<h2>Additional Charts</h2>
+       <div class="chart-grid">
+         ${unreferencedCharts.map(([n, url]) => `<div class="chart-card">
+           <img src="${url}" alt="${n}" />
+           <div class="chart-label">${n}</div>
          </div>`).join("\n")}
        </div>`
     : "";
 
   const plansHTML = data.plans?.length
-    ? `<h2>Analysis Plan</h2><ol>${data.plans.map((s: string) => `<li>${s}</li>`).join("")}</ol>`
+    ? `<h2>Analysis Plan</h2><ol class="plan-list">${data.plans.map((s: string, i: number) =>
+        `<li><span class="step-num">${i + 1}</span>${s}</li>`).join("")}</ol>`
     : "";
 
   const codeHTML = data.final_code
-    ? `<details><summary style="cursor:pointer;font-weight:600;margin:16px 0;">Generated Code</summary>
-       <pre style="background:#1e1e2e;color:#cdd6f4;padding:16px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.5;"><code>${data.final_code.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</code></pre></details>`
+    ? `<details class="code-section"><summary>Generated Code</summary>
+       <pre><code>${data.final_code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code></pre></details>`
     : "";
 
   return `<!DOCTYPE html>
@@ -322,36 +317,73 @@ async function buildReportHTML(
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DS Star Analysis Report</title>
 <style>
+  :root { --bg: #ffffff; --fg: #1f2937; --fg-dim: #6b7280; --fg-muted: #4b5563; --border: #e5e7eb; --surface: #f9fafb; --accent: #6366f1; --green: #16a34a; --amber: #d97706; --red: #dc2626; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #1f2937; max-width: 900px; margin: 0 auto; padding: 40px 24px; background: #fff; }
-  h1 { font-size: 28px; margin-bottom: 8px; color: #111827; }
-  h2 { font-size: 20px; margin: 32px 0 12px; color: #111827; border-bottom: 2px solid #e5e7eb; padding-bottom: 6px; }
-  h3 { font-size: 16px; margin: 20px 0 8px; color: #374151; }
-  p { margin-bottom: 12px; color: #4b5563; }
-  ul, ol { margin: 8px 0 16px 24px; color: #4b5563; }
-  li { margin-bottom: 4px; }
-  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-  th, td { border: 1px solid #e5e7eb; padding: 8px 12px; text-align: left; font-size: 14px; }
-  th { background: #f9fafb; font-weight: 600; color: #374151; }
-  tr:hover { background: #f9fafb; }
-  code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-  pre code { background: none; padding: 0; }
-  blockquote { border-left: 4px solid #6366f1; padding: 8px 16px; margin: 12px 0; background: #f5f3ff; color: #4338ca; border-radius: 0 6px 6px 0; }
-  strong { color: #111827; }
-  hr { border: none; border-top: 1px solid #e5e7eb; margin: 24px 0; }
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 24px 0; }
-  .stat { text-align: center; padding: 16px; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; }
-  .stat-value { font-size: 28px; font-weight: 700; }
-  .stat-label { font-size: 12px; color: #6b7280; margin-top: 4px; }
-  .green { color: #16a34a; } .amber { color: #d97706; } .red { color: #dc2626; } .blue { color: #6366f1; }
-  .header-meta { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
-  img { max-width: 100%; }
-  @media print { body { padding: 20px; } .stats { break-inside: avoid; } }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.7; color: var(--fg); max-width: 920px; margin: 0 auto; padding: 48px 28px; background: var(--bg); }
+  h1 { font-size: 26px; font-weight: 700; margin: 32px 0 8px; color: #111827; }
+  h2 { font-size: 20px; font-weight: 600; margin: 36px 0 14px; color: #111827; border-bottom: 2px solid var(--border); padding-bottom: 8px; }
+  h3 { font-size: 16px; font-weight: 600; margin: 24px 0 10px; color: #374151; }
+  h4 { font-size: 14px; font-weight: 600; margin: 18px 0 8px; color: #374151; }
+  p { margin-bottom: 14px; color: var(--fg-muted); font-size: 15px; }
+  ul, ol { margin: 8px 0 16px 24px; color: var(--fg-muted); font-size: 15px; }
+  li { margin-bottom: 6px; line-height: 1.6; }
+  a { color: var(--accent); text-decoration: none; }
+  strong { color: #111827; font-weight: 600; }
+  em { color: var(--fg-muted); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+  img { max-width: 100%; border-radius: 8px; margin: 16px 0; display: block; }
+
+  /* Tables */
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; }
+  th { background: var(--surface); font-weight: 600; color: #374151; font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) { background: #fafafa; }
+  tr:hover { background: #f3f4f6; }
+
+  /* Code */
+  code { background: #f3f4f6; padding: 2px 7px; border-radius: 4px; font-size: 13px; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; color: #c7254e; }
+  pre { background: #1e1e2e; color: #cdd6f4; padding: 20px; border-radius: 10px; overflow-x: auto; font-size: 13px; line-height: 1.6; margin: 16px 0; }
+  pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+
+  /* Blockquote */
+  blockquote { border-left: 4px solid var(--accent); padding: 12px 20px; margin: 16px 0; background: #f5f3ff; color: #4338ca; border-radius: 0 8px 8px 0; }
+  blockquote p { color: #4338ca; margin-bottom: 4px; }
+
+  /* Stats dashboard */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 28px 0; }
+  .stat { text-align: center; padding: 18px 12px; background: var(--surface); border-radius: 10px; border: 1px solid var(--border); }
+  .stat-value { font-size: 28px; font-weight: 700; line-height: 1.2; }
+  .stat-label { font-size: 11px; color: var(--fg-dim); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .green { color: var(--green); } .amber { color: var(--amber); } .red { color: var(--red); } .blue { color: var(--accent); }
+
+  .header-meta { color: var(--fg-dim); font-size: 14px; margin-bottom: 4px; }
+
+  /* Charts gallery */
+  .chart-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin: 20px 0; }
+  .chart-card { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .chart-card img { border-radius: 0; margin: 0; width: 100%; display: block; }
+  .chart-label { padding: 8px 12px; font-size: 12px; color: var(--fg-dim); background: var(--surface); }
+
+  /* Plan list */
+  .plan-list { list-style: none; margin-left: 0; counter-reset: none; }
+  .plan-list li { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid #f3f4f6; }
+  .step-num { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: white; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+
+  /* Code section */
+  .code-section { margin: 20px 0; }
+  .code-section summary { cursor: pointer; font-weight: 600; font-size: 16px; padding: 12px 0; color: #374151; }
+  .code-section summary:hover { color: var(--accent); }
+
+  @media print {
+    body { padding: 20px; }
+    .stats { break-inside: avoid; }
+    pre { white-space: pre-wrap; word-wrap: break-word; }
+  }
 </style>
 </head>
 <body>
 <h1>DS Star Analysis Report</h1>
-<p class="header-meta">Generated ${new Date().toLocaleString()} | ${data.strategies_explored ?? "-"} strategies | ${data.total_ai_calls ?? "-"} AI calls${data.elapsed_seconds ? ` | ${Math.round(data.elapsed_seconds)}s` : ""}</p>
+<p class="header-meta">Generated ${new Date().toLocaleString()} &middot; ${data.strategies_explored ?? "-"} strategies &middot; ${data.total_ai_calls ?? "-"} AI calls${data.elapsed_seconds ? ` &middot; ${Math.round(data.elapsed_seconds)}s` : ""}</p>
 
 <div class="stats">
   <div class="stat"><div class="stat-value">${data.iterations ?? "-"}</div><div class="stat-label">Iterations</div></div>
@@ -360,24 +392,14 @@ async function buildReportHTML(
   <div class="stat"><div class="stat-value ${score != null && score >= 0.7 ? "green" : score != null && score >= 0.4 ? "amber" : "red"}">${score != null ? Number(score).toFixed(2) : "-"}</div><div class="stat-label">Score</div></div>
 </div>
 
-${processedMarkdown
-  .replace(/^# /gm, "<h1>").replace(/<h1>(.*)$/gm, "<h1>$1</h1>")
-  .replace(/^## /gm, "<h2>").replace(/<h2>(.*)$/gm, "<h2>$1</h2>")
-  .replace(/^### /gm, "<h3>").replace(/<h3>(.*)$/gm, "<h3>$1</h3>")
-  .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-  .replace(/^- (.*)$/gm, "<li>$1</li>")
-  .replace(/(<li>.*<\/li>\n?)+/g, "<ul>$&</ul>")
-  .replace(/\n\n/g, "</p><p>")
-  .replace(/^(?!<[hupold])/gm, "<p>")
-  .replace(/<p><\/p>/g, "")
-}
+${bodyHTML}
 
-${chartsHTML}
+${galleryHTML}
 ${plansHTML}
 ${codeHTML}
 
 <hr />
-<p style="font-size:12px;color:#9ca3af;text-align:center;">Generated by DS Star — AgentField Data Science Agent</p>
+<p style="font-size:12px;color:#9ca3af;text-align:center;">Generated by DS Star &mdash; AgentField Data Science Agent</p>
 </body>
 </html>`;
 }
