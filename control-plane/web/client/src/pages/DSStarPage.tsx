@@ -32,7 +32,7 @@ import { WorkflowDAGViewer } from "@/components/WorkflowDAG";
 import { StepDetail } from "@/components/StepDetail";
 import { getWorkflowDAGLightweight } from "@/services/workflowsApi";
 import { dsStarApi } from "@/services/dsStarApi";
-import type { ChartInfo } from "@/services/dsStarApi";
+import type { ChartData } from "@/services/dsStarApi";
 import type { AsyncExecuteResponse, ExecutionStatusResponse } from "@/types/execution";
 import type { WorkflowDAGLightweightResponse } from "@/types/workflows";
 import { cn } from "@/lib/utils";
@@ -169,7 +169,7 @@ function FileUploadZone({
   );
 }
 
-function ChartsGrid({ charts }: { charts: ChartInfo[] }) {
+function ChartsGrid({ charts }: { charts: ChartData[] }) {
   const [selectedChart, setSelectedChart] = useState<string | null>(null);
 
   if (charts.length === 0) return null;
@@ -194,7 +194,7 @@ function ChartsGrid({ charts }: { charts: ChartInfo[] }) {
               )}
             >
               <img
-                src={dsStarApi.getChartUrl(chart.name)}
+                src={chart.data}
                 alt={chart.name}
                 className="w-full h-auto bg-white"
                 loading="lazy"
@@ -253,29 +253,12 @@ async function buildReportHTML(
 ): Promise<string> {
   let markdown = data.final_answer || "";
 
-  // Extract chart filenames directly from markdown ![alt](charts/filename.png)
-  const chartRefPattern = /!\[[^\]]*\]\(charts\/([^)]+)\)/g;
-  const chartFilenames = new Set<string>();
-  let m;
-  while ((m = chartRefPattern.exec(markdown)) !== null) {
-    chartFilenames.add(m[1]);
-  }
-
-  // Fetch each chart image from agent proxy and convert to base64
+  // Build chart lookup from pipeline result (base64 data URLs embedded by backend)
   const chartEmbeds: Map<string, string> = new Map();
-  await Promise.all([...chartFilenames].map(async (filename) => {
-    try {
-      const resp = await fetch(dsStarApi.getChartUrl(filename));
-      if (!resp.ok) return;
-      const blob = await resp.blob();
-      const dataUrl = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.readAsDataURL(blob);
-      });
-      chartEmbeds.set(filename, dataUrl);
-    } catch { /* skip */ }
-  }));
+  const chartArr: Array<{ name: string; data: string }> = data.charts ?? [];
+  for (const c of chartArr) {
+    if (c.name && c.data) chartEmbeds.set(c.name, c.data);
+  }
 
   const score = data.run_score != null
     ? (typeof data.run_score === "object" ? (data.run_score as any).score : data.run_score)
@@ -418,7 +401,7 @@ ${codeHTML}
 </html>`;
 }
 
-function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | null; charts: ChartInfo[] }) {
+function ResultsPanel({ result, charts }: { result: ExecutionStatusResponse | null; charts: ChartData[] }) {
   const [codeOpen, setCodeOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
@@ -635,7 +618,7 @@ export function DSStarPage() {
   const [numVerifiers, setNumVerifiers] = useState(3);
   const [phase, setPhase] = useState<PipelinePhase>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [charts, setCharts] = useState<ChartInfo[]>([]);
+  const [charts, setCharts] = useState<ChartData[]>([]);
 
   const [executionId, setExecutionId] = useState<string | null>(null);
   const [workflowId, setWorkflowId] = useState<string | null>(null);
@@ -745,7 +728,8 @@ export function DSStarPage() {
     if (!execStatus) return;
     if (execStatus.status === "succeeded") {
       setPhase("completed");
-      dsStarApi.listCharts().then(setCharts).catch(() => {});
+      const resultCharts = (execStatus.result as any)?.charts;
+      if (Array.isArray(resultCharts)) setCharts(resultCharts);
     } else if (execStatus.status === "failed" || execStatus.status === "error") {
       setPhase("error");
       setErrorMsg(execStatus.error ?? "Pipeline failed");

@@ -8,6 +8,7 @@ Modeled after af-deep-research's pattern.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json as _json
 import logging
 import os
@@ -855,10 +856,23 @@ async def run_pipeline(
     score_obj = ml["run_score"]
     run_score = score_obj.get("score", 0.5) if isinstance(score_obj, dict) else score_obj
 
+    chart_data = []
+    charts_dir = os.path.join(workdir, "final", "charts")
+    for c in charts:
+        if not c.get("success"):
+            continue
+        fname = c.get("filename", "")
+        fpath = os.path.join(charts_dir, fname)
+        if os.path.isfile(fpath):
+            with open(fpath, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+            ext = os.path.splitext(fname)[1].lstrip(".") or "png"
+            chart_data.append({"name": fname, "data": f"data:image/{ext};base64,{b64}"})
+
     return {
         "final_answer": report["final_answer"],
         "final_code": best.get("current_code", ""),
-        "charts": [c.get("filename", "") for c in charts if c.get("success")],
+        "charts": chart_data,
         "strategies_explored": len(branches),
         "total_ai_calls": total_ai_calls,
         "iterations": sum(b.get("iteration", 0) for b in branches),
