@@ -271,24 +271,25 @@ async function buildReportHTML(
     ? (typeof data.run_score === "object" ? (data.run_score as any).score : data.run_score)
     : null;
 
-  // Replace markdown chart image refs with base64 before converting
+  // Replace markdown chart image refs with inline <img> tags containing base64
   let markdown = data.final_answer || "";
+  const referencedCharts = new Set<string>();
   for (const [name, dataUrl] of chartEmbeds) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    markdown = markdown.replace(
-      new RegExp(`!\\[([^\\]]*)\\]\\(charts/${escaped}\\)`, "g"),
-      `![{$1}](${dataUrl})`
-    );
+    const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(charts/${escaped}\\)`, "g");
+    if (pattern.test(markdown)) {
+      referencedCharts.add(name);
+      markdown = markdown.replace(
+        new RegExp(`!\\[([^\\]]*)\\]\\(charts/${escaped}\\)`, "g"),
+        `<img src="${dataUrl}" alt="$1" style="max-width:100%;border-radius:8px;margin:12px 0;display:block;" />`
+      );
+    }
   }
 
   // Convert markdown to HTML using marked (proper GFM tables, code blocks, lists)
   const bodyHTML = await marked.parse(markdown, { gfm: true, breaks: false });
 
   // Charts gallery (any chart not already referenced in the report)
-  const referencedCharts = new Set<string>();
-  for (const [name] of chartEmbeds) {
-    if (markdown.includes(chartEmbeds.get(name)!)) referencedCharts.add(name);
-  }
   const unreferencedCharts = [...chartEmbeds.entries()].filter(([n]) => !referencedCharts.has(n));
   const galleryHTML = unreferencedCharts.length > 0
     ? `<h2>Additional Charts</h2>

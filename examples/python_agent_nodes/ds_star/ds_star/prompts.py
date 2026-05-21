@@ -648,43 +648,39 @@ def render_report_section_prompt(
     execution_stdout: str = "",
 ) -> List[Dict[str, Any]]:
     section_instructions = {
-        "executive_summary": "Write a 3-5 sentence executive summary of the entire analysis. Highlight the most important finding.",
-        "key_findings": "List the top 5-8 key findings with supporting data points. Use bullet points.",
-        "statistical_analysis": "Present detailed statistical results: distributions, correlations, aggregations. Use tables where appropriate.",
-        "data_quality": "Report on data quality: completeness, consistency, anomalies found.",
-        "methodology": "Describe the analysis methodology: what approaches were tried, which worked best, and why.",
-        "visualizations": "Reference each chart by filename and explain what it shows. Format: ![Chart Title](charts/filename.png)",
-        "recommendations": "Provide actionable recommendations based on the findings. Number them.",
-        "appendix": "Include technical details: column descriptions, data transformations applied, code snippets.",
+        "executive_summary": "Write a concise 3-4 sentence executive summary. State the key conclusion and one supporting data point. MAX 100 words.",
+        "key_findings": "List 3-5 key findings as bullet points. Each finding: one sentence + one number. MAX 150 words.",
+        "statistical_analysis": "Present the most important statistical results in ONE compact table (max 8 rows). Add 2-3 sentences of interpretation. MAX 200 words.",
+        "data_quality": "2-3 sentences on data completeness and any issues found. MAX 60 words.",
+        "methodology": "1-2 sentences on the approach used. MAX 40 words.",
+        "visualizations": "For each chart, write ONE sentence explaining the key takeaway. Reference as ![title](charts/filename.png). MAX 150 words.",
+        "recommendations": "3-4 numbered recommendations, one sentence each. MAX 80 words.",
+        "appendix": "List column names and data types in a compact table. MAX 100 words.",
     }
     instructions = section_instructions.get(section_name, f"Write the {section_name} section.")
     charts_ref = "\n".join([f"- charts/{c}" for c in chart_filenames]) if chart_filenames else "No charts available"
 
-    user = f"""You are an expert data analyst writing a professional report.
+    user = f"""You are an expert data analyst writing a concise professional report.
+CRITICAL: Keep output SHORT. Respect the MAX word count in the instructions. No filler, no repetition.
 
-# Question being answered
+# Question
 {query}
 
-# Section to write
-{section_name}
-
-# Instructions
+# Section: {section_name}
 {instructions}
 
-# Analysis insights
-{insights[:3000]}
+# Insights
+{insights[:2000]}
 
-# Analysis output
-{execution_stdout[:2000]}
+# Output excerpt
+{execution_stdout[:1000]}
 
-# Available charts
+# Charts
 {charts_ref}
 
-# Your task
-Write the "{section_name}" section in markdown format. Be data-driven and specific.
-For chart references, use: ![Chart Title](charts/filename.png)
-
-Return ONLY the markdown content for this section (no wrapping code blocks)."""
+Write ONLY the "{section_name}" section in markdown. Be specific with numbers, not verbose with words.
+For charts: ![Title](charts/filename.png)
+Return ONLY markdown (no code blocks wrapping)."""
     return [{"role": "user", "content": user}]
 
 

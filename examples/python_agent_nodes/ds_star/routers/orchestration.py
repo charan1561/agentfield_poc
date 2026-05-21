@@ -716,29 +716,12 @@ async def generate_report(
     if not drafts:
         return {"final_answer": f"# Analysis Report\n\n**Query:** {query}\n\nReport generation failed."}
 
-    # Edit pass in parallel
-    all_draft_text = "\n\n".join([d["content"] for d in drafts])
-
-    async def _edit_section(draft: Dict) -> Dict:
-        prompt = (
-            f"Refine this report section. Fix inconsistencies, improve flow, add cross-references.\n\n"
-            f"Section: {draft['section']}\n\n"
-            f"Draft:\n{draft['content']}\n\n"
-            f"Full report context (other sections):\n{all_draft_text[:3000]}\n\n"
-            f"Return the refined section content only."
-        )
-        refined = await asyncio.to_thread(
-            llm.chat_complete, messages=[{"role": "user", "content": prompt}], temperature=0.3,
-        )
-        return {"section": draft["section"], "content": refined}
-
-    raw_polished = await asyncio.gather(*[_edit_section(d) for d in drafts], return_exceptions=True)
-    polished = [p if isinstance(p, dict) else d for p, d in zip(raw_polished, drafts)]
+    # Skip edit pass — drafts are already concise from the prompt constraints
 
     # Assemble final report
     report_parts = []
     report_parts.append(f"# Analysis Report\n\n**Query:** {query}\n")
-    for section in polished:
+    for section in drafts:
         name = section["section"].replace("_", " ").title()
         report_parts.append(f"## {name}\n\n{section['content']}")
 

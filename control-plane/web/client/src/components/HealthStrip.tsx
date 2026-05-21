@@ -40,9 +40,12 @@ export function HealthStrip({ className }: HealthStripProps) {
     refreshAllLiveQueries,
   } = useSSESync();
   const llmLoading = llmHealth.isLoading;
+  const llmEnabled = llmHealth.data?.enabled !== false;
   const llmOk = llmHealth.data
-    ? llmHealth.data.healthy &&
-      !llmHealth.data.endpoints?.some((ep) => !ep.healthy)
+    ? llmEnabled
+      ? llmHealth.data.healthy &&
+        !llmHealth.data.endpoints?.some((ep) => !ep.healthy)
+      : undefined
     : undefined;
 
   const nodes: AgentNodeSummary[] = agents.data?.nodes ?? [];
@@ -254,7 +257,12 @@ export function HealthStrip({ className }: HealthStripProps) {
           <Tooltip>
             <TooltipTrigger asChild>
               <div className="flex items-center gap-1 sm:gap-1.5">
-                {llmOk === true ? (
+                {!llmEnabled ? (
+                  <CircleAlert
+                    className="size-3.5 shrink-0 text-muted-foreground"
+                    aria-hidden
+                  />
+                ) : llmOk === true ? (
                   <CircleCheck
                     className="size-3.5 shrink-0 text-green-500"
                     aria-hidden
@@ -277,18 +285,20 @@ export function HealthStrip({ className }: HealthStripProps) {
                   variant={llmOk === true ? "secondary" : llmOk === false ? "destructive" : "outline"}
                   className="h-5 px-1.5 text-micro"
                 >
-                  {llmOk === true ? "Healthy" : llmOk === false ? "Degraded" : "Unknown"}
+                  {!llmEnabled ? "N/A" : llmOk === true ? "Healthy" : llmOk === false ? "Degraded" : "Unknown"}
                 </Badge>
               </div>
             </TooltipTrigger>
             <TooltipContent>
-              {llmOk === true
-                ? "All LLM endpoints responding"
-                : llmOk === false
-                  ? "One or more LLM endpoints are unhealthy"
-                  : llmLoading
-                    ? "Checking LLM health…"
-                    : "LLM health status unavailable"}
+              {!llmEnabled
+                ? "LLM health monitoring not configured"
+                : llmOk === true
+                  ? "All LLM endpoints responding"
+                  : llmOk === false
+                    ? "One or more LLM endpoints are unhealthy"
+                    : llmLoading
+                      ? "Checking LLM health…"
+                      : "LLM health status unavailable"}
             </TooltipContent>
           </Tooltip>
 
